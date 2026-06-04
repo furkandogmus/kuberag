@@ -68,6 +68,8 @@ loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
 
 ## Architecture
 
+![kuberag Architecture](docs/images/architecture.png)
+
 Two planes, intentionally separated:
 
 | Plane | What | Tech |
