@@ -1,0 +1,62 @@
+{
+  "title": "kuberag",
+  "uid": "kuberag",
+  "schemaVersion": 39,
+  "tags": ["kuberag", "rag"],
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "knowledgebase",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "query": "label_values(rag_knowledgebase_indexed_chunks, knowledgebase)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Indexed chunks",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "rag_knowledgebase_indexed_chunks{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "{{knowledgebase}}"}
+      ]
+    },
+    {
+      "title": "Retrieval recall (%)",
+      "type": "timeseries",
+      "fieldConfig": {"defaults": {"min": 0, "max": 100, "unit": "percent"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "rag_knowledgebase_recall_percent{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "{{knowledgebase}}"}
+      ]
+    },
+    {
+      "title": "Ingestions (rate by result)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "sum by (result) (rate(rag_knowledgebase_ingestions_total{knowledgebase=~\"$knowledgebase\"}[5m]))", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "title": "Auto-tune attempts",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "rag_knowledgebase_autotune_attempts{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "{{knowledgebase}}"}
+      ]
+    },
+    {
+      "title": "Reconcile errors (rate)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m]))", "legendFormat": "{{controller}}"}
+      ]
+    }
+  ]
+}

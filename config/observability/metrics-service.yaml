@@ -1,0 +1,15 @@
+# Service exposing the operator's Prometheus metrics endpoint (:8080).
+apiVersion: v1
+kind: Service
+metadata:
+  name: kuberag-metrics
+  namespace: kuberag-system
+  labels:
+    app.kubernetes.io/name: kuberag
+spec:
+  selector:
+    app.kubernetes.io/name: kuberag
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics

@@ -42,6 +42,14 @@ GitHub / S3 (MinIO) / web sources → Qdrant **and** pgvector; Gemini and Ollama
 embeddings; Ollama answer generation; incremental ingest; the eval + auto-tune
 loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
 
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) — control/data planes, reconcile state machine, ingest/eval/auto-tune, hashing.
+- [API reference](docs/API.md) — every CRD field (`KnowledgeBase`, `Retriever`, `VectorIndex`).
+- [Providers & backends](docs/PROVIDERS.md) — sources, stores, embeddings, generation (+ fully-local Ollama).
+- [Observability](docs/OBSERVABILITY.md) — status/conditions, events, Prometheus metrics, Grafana dashboard.
+- [Roadmap](docs/ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+
 ## Custom Resources
 
 | Kind | Short | Purpose |

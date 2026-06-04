@@ -1,0 +1,17 @@
+# Prometheus Operator ServiceMonitor for the kuberag metrics endpoint.
+# Requires the Prometheus Operator CRDs (monitoring.coreos.com).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kuberag
+  namespace: kuberag-system
+  labels:
+    app.kubernetes.io/name: kuberag
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuberag
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
