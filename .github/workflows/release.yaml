@@ -7,6 +7,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # Docs/sample-only changes don't change images; skip the (slow) image build.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "config/samples/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - "LICENSE"
 
 concurrency:
   group: release-${{ github.ref }}
