@@ -13,7 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	ragv1alpha1 "github.com/furkandogmus/rag-operator/api/v1alpha1"
+	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
 
 // VectorIndexReconciler probes the health of a vector store collection.

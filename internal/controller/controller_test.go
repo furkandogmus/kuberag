@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	ragv1alpha1 "github.com/furkandogmus/rag-operator/api/v1alpha1"
+	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
 
 func boolPtr(b bool) *bool { return &b }

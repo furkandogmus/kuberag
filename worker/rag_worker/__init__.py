@@ -1,4 +1,4 @@
-"""RAG worker: data-plane for the rag-operator.
+"""RAG worker: data-plane for kuberag.
 
 Subcommands (see __main__): ingest, eval, cleanup.
 """

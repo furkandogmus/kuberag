@@ -12,13 +12,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	ragv1alpha1 "github.com/furkandogmus/rag-operator/api/v1alpha1"
+	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
 
 const (
-	defaultWorkerImage    = "ghcr.io/furkandogmus/rag-worker:latest"
-	defaultRetrieverImage = "ghcr.io/furkandogmus/rag-retriever:latest"
-	defaultWorkerSA       = "rag-operator-worker"
+	defaultWorkerImage    = "ghcr.io/furkandogmus/kuberag-worker:latest"
+	defaultRetrieverImage = "ghcr.io/furkandogmus/kuberag-retriever:latest"
+	defaultWorkerSA       = "kuberag-worker"
 
 	labelManagedBy = "app.kubernetes.io/managed-by"
 	labelKB        = "rag.furkan.dev/knowledgebase"
@@ -172,7 +172,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 			Name:      name,
 			Namespace: kb.Namespace,
 			Labels: map[string]string{
-				labelManagedBy: "rag-operator",
+				labelManagedBy: "kuberag",
 				labelKB:        kb.Name,
 				labelJobType:   jobTypeLabel,
 				labelSpecHash:  hash,

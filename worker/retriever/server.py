@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from rag_worker.embeddings import from_spec
 from rag_worker.stores import make_store
 
-app = FastAPI(title="rag-retriever")
+app = FastAPI(title="kuberag-retriever")
 
 _DEFAULT_TOPK = int(os.environ.get("TOPK", "8"))
 _SCORE_THRESHOLD = int(os.environ.get("SCORE_THRESHOLD", "0")) / 100.0

@@ -1,12 +1,16 @@
-# rag-operator
+# kuberag
 
-A Kubernetes operator that manages RAG knowledge bases **declaratively**.
+[![ci](https://github.com/furkandogmus/kuberag/actions/workflows/ci.yaml/badge.svg)](https://github.com/furkandogmus/kuberag/actions/workflows/ci.yaml)
+
+A Kubernetes operator that manages **RAG** (Retrieval-Augmented Generation)
+knowledge bases **declaratively**.
 
 You describe the *desired knowledge state* — sources, chunking, embedding model,
 vector store, freshness, retrieval-quality target — and the operator continuously
 reconciles reality toward it: syncing sources, chunking, embedding, writing to the
 vector DB, re-indexing on drift, evaluating retrieval quality and **auto-tuning
-chunking** to hit a recall target, and serving low-latency retrieval.
+chunking** to hit a recall target, and serving low-latency retrieval (optionally
+with LLM answer generation — full RAG).
 
 ```yaml
 apiVersion: rag.furkan.dev/v1alpha1
@@ -15,7 +19,7 @@ metadata:
   name: company-docs
 spec:
   sources:
-    - name: docs-repo
+    - name: docs
       type: github
       github: { repo: qdrant/landing_page, ref: master, includeGlobs: ["**/*.md"] }
   chunking: { strategy: semantic, maxTokens: 800, overlap: 80 }
@@ -31,13 +35,27 @@ spec:
     autoTune: { enabled: true, maxAttempts: 3 }       # below target -> tune & re-index
 ```
 
+## Status
+
+`v1alpha1`, early but functional. Validated **end-to-end on a live cluster** (k3d):
+GitHub / S3 (MinIO) / web sources → Qdrant **and** pgvector; Gemini and Ollama
+embeddings; Ollama answer generation; incremental ingest; the eval + auto-tune
+loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
+
 ## Custom Resources
 
 | Kind | Short | Purpose |
 |------|-------|---------|
 | `KnowledgeBase` | `kb` | The control surface: sources → chunk → embed → store, freshness, quality, auto-tune. |
-| `Retriever` | `rtr` | A serving endpoint (Deployment + Service) for low-latency querying over a KnowledgeBase, with optional reranking. |
+| `Retriever` | `rtr` | A serving endpoint (Deployment + Service) over a KnowledgeBase: vector search, optional reranking, and optional LLM answer generation. |
 | `VectorIndex` | `vi` | Auto-created per KnowledgeBase; tracks collection health, point count and dimension. |
+
+## Supported backends
+
+- **Sources:** `github` (public/private via token, blobless+sparse clone), `s3` (incl. MinIO and other S3-compatible stores), `web` (depth-bounded crawl).
+- **Vector stores:** `qdrant`, `pgvector`, `milvus`.
+- **Embeddings:** `local` (fastembed: `bge-small`/`bge-large`) or any OpenAI-compatible API via `openai` / `gemini` / `openai-compatible` (OpenAI, Gemini, **Ollama**, vLLM, LM Studio, TEI, …). Dimension is taken from a built-in table or auto-detected.
+- **Generation** (optional, on `Retriever`): OpenAI-compatible chat — `openai` / `openrouter` / `groq` / `gemini` / `openai-compatible` (incl. **Ollama**). `/query` then returns `{answer, sources}`.
 
 ## Architecture
 
@@ -60,65 +78,70 @@ Retriever ──watch──▶ Reconciler ──creates──▶ Deployment + Se
 The KnowledgeBase reconciler:
 
 1. Computes a `specHash` over re-ingest-relevant fields (sources, effective chunking, model, store).
-2. Decides work: **ingest** (first run, spec drift, model change, or freshness cron due) takes priority, then **evaluate** (eval cron due).
+2. Decides work: **ingest** (first run, spec drift, model change, or freshness cron) takes priority, then **evaluate** (eval cron).
 3. Creates a single in-flight **Job** (tracked in `status.activeJob`), injecting secrets as env and passing the spec as JSON.
 4. On completion reads the worker's **result ConfigMap** and writes `status` (phase, conditions, `indexedChunks`, per-source revisions, evaluation).
-5. **Incremental ingest:** the worker probes each source's revision (`git ls-remote`, S3 ETags, crawl hash) and skips unchanged sources.
-6. **Auto-tune:** if measured recall < `minimumRecallPercent` and auto-tune is enabled, it adjusts effective chunking (grow overlap, then shrink chunk size), clears the spec hash to force a re-index, and retries up to `maxAttempts`.
+5. **Incremental ingest:** the worker probes each source's revision (`git ls-remote` SHA, S3 ETags, crawl hash) and skips unchanged sources; a spec change forces a full re-process.
+6. **Auto-tune:** if measured recall < `minimumRecallPercent` and auto-tune is enabled, it adjusts effective chunking (grow overlap, then shrink chunk size), clears the spec hash to force a re-index, and retries up to `maxAttempts`; if still short it goes `Degraded`.
 7. **Deletion:** a finalizer runs a `cleanup` Job that drops the remote collection before the object is removed.
-
-## Supported backends
-
-- **Sources:** `github` (public/private via token), `s3` (incl. S3-compatible/MinIO), `web` (depth-bounded crawl).
-- **Embeddings:** `local` via fastembed (`bge-small`, `bge-large`), `openai` (`text-embedding-3-small/large`).
-- **Vector stores:** `qdrant`, `pgvector`, `milvus`.
 
 ## Project layout
 
 ```
 api/v1alpha1/          CRD Go types (+ generated DeepCopy)
-internal/controller/   reconcilers: knowledgebase, retriever, vectorindex
-                       + jobs / scheduling (cron) / metrics helpers + tests
+internal/controller/   reconcilers (knowledgebase, retriever, vectorindex),
+                       jobs / scheduling / metrics, unit + envtest integration tests
 cmd/main.go            manager entrypoint (3 controllers, leader election)
-worker/rag_worker/     Python data plane: sources, stores, chunking,
-                       embeddings, ingest, evaluate, cleanup
-worker/retriever/      FastAPI retrieval server
+worker/rag_worker/     Python data plane: sources, stores, chunking, embeddings,
+                       ingest, evaluate, cleanup
+worker/retriever/      FastAPI retrieval + generation server
 worker/tests/          Python unit tests
-config/crd/            generated CRD manifests (3 kinds)
-config/rbac/           operator ClusterRole, leader-election Role, worker RBAC
-config/manager/        operator Deployment + ServiceAccount + binding
-config/samples/        KnowledgeBase, Retriever, eval dataset, local Qdrant
+config/crd|rbac|manager   generated CRDs, RBAC, operator Deployment
+config/samples/        runnable examples (Qdrant, pgvector, MinIO, Ollama, Gemini, …)
+.github/workflows/     CI (Go build/vet/fmt/unit/integration + Python tests)
 ```
 
 ## Quick start (local)
 
 ```bash
-make test          # Go unit tests
-make test-py       # Python unit tests
-make install       # CRDs
-make run           # run the operator against your kubeconfig
+make test               # Go unit tests
+make test-integration   # envtest integration tests (downloads kube-apiserver/etcd)
+make test-py            # Python worker tests
 
-# In another shell: Qdrant + worker RBAC + eval dataset + KnowledgeBase + Retriever
-make sample
+make install            # install CRDs
+make run                # run the operator against your current kubeconfig
+make sample             # Qdrant + worker RBAC + eval dataset + KnowledgeBase + Retriever
 
 kubectl get kb,vi,rtr
-kubectl describe kb company-docs
 ```
 
-Build & deploy in-cluster:
+In-cluster:
 
 ```bash
-make docker-build-all        # operator + worker + retriever images
-make deploy                  # CRDs + RBAC + manager
-make worker-rbac             # worker ServiceAccount/RBAC (per KB namespace)
+make docker-build-all   # operator + worker + retriever images
+make deploy             # CRDs + RBAC + manager
+make worker-rbac        # worker ServiceAccount/RBAC (per KB namespace)
 ```
+
+### Fully local RAG with Ollama (no API keys)
+
+```bash
+ollama pull nomic-embed-text && ollama pull qwen2.5:3b
+# expose Ollama to the cluster: OLLAMA_HOST=0.0.0.0, then point baseURL at the host
+kubectl apply -f config/samples/ollama.yaml
+kubectl port-forward svc/ollama-docs-retriever 8000:8000
+curl -s localhost:8000/query -d '{"query":"what is this about?"}' | jq
+# -> {"answer": "...", "results": [{"docPath": "...", "score": 0.7, ...}]}
+```
+
+See `config/samples/providers.yaml` for a Gemini-embeddings + hosted-LLM example.
 
 ## Status & observability
 
 ```bash
 $ kubectl get kb
-NAME           PHASE   MODEL       CHUNKS   RECALL   LASTINDEXED   AGE
-company-docs   Ready   bge-small   742      86       2m            5m
+NAME           PHASE   MODEL              CHUNKS   RECALL   LASTINDEXED   AGE
+company-docs   Ready   bge-small          742      86       2m            5m
 
 $ kubectl get vi
 NAME                 HEALTH    POINTS   DIM   AGE
@@ -127,14 +150,7 @@ company-docs-index   Healthy   742      384   5m
 
 - `status.conditions`: `Ready`, `Ingesting`, `Evaluated` (KB); `Ready` (VectorIndex); `Available` (Retriever).
 - **Events** on every transition (`IngestionStarted/Complete/Failed`, `Evaluating`, `RecallMet`, `AutoTuning`, `RecallBelowTarget`, `Cleanup`).
-- **Prometheus metrics** (`/metrics` on `:8080`): `rag_knowledgebase_ingestions_total`, `rag_knowledgebase_indexed_chunks`, `rag_knowledgebase_recall_percent`, `rag_knowledgebase_autotune_attempts`.
-
-## Querying a Retriever
-
-```bash
-kubectl port-forward svc/company-docs-retriever 8000:8000
-curl -s localhost:8000/query -d '{"query":"how do I create a collection?"}' | jq
-```
+- **Prometheus metrics** on `:8080`: `rag_knowledgebase_ingestions_total`, `rag_knowledgebase_indexed_chunks`, `rag_knowledgebase_recall_percent`, `rag_knowledgebase_autotune_attempts`.
 
 ## Design notes / limitations
 
@@ -142,5 +158,8 @@ curl -s localhost:8000/query -d '{"query":"how do I create a collection?"}' | jq
 - Auto-tune adjusts chunking only; it does not change the embedding model.
 - VectorIndex health probing is implemented for Qdrant (HTTP); other stores report `Unknown` and rely on ingestion success.
 - Recall is computed as recall@TopK over a user-provided query dataset (expected source paths).
+- The API group is `rag.furkan.dev` (independent of the repository name).
 
-> Status: `v1alpha1`. APIs may still change before `v1`.
+## License
+
+MIT — see [LICENSE](LICENSE).

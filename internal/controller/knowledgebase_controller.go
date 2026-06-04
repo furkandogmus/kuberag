@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	ragv1alpha1 "github.com/furkandogmus/rag-operator/api/v1alpha1"
+	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
 
 const (

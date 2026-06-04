@@ -12,8 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	ragv1alpha1 "github.com/furkandogmus/rag-operator/api/v1alpha1"
-	"github.com/furkandogmus/rag-operator/internal/controller"
+	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
+	"github.com/furkandogmus/kuberag/internal/controller"
 )
 
 var (
@@ -45,7 +45,7 @@ func main() {
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr, SecureServing: false},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "rag-operator.furkan.dev",
+		LeaderElectionID:       "kuberag.furkan.dev",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -86,7 +86,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting rag-operator")
+	setupLog.Info("starting kuberag")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)

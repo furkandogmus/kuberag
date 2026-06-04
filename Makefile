@@ -1,6 +1,6 @@
-IMG ?= ghcr.io/furkandogmus/rag-operator:latest
-WORKER_IMG ?= ghcr.io/furkandogmus/rag-worker:latest
-RETRIEVER_IMG ?= ghcr.io/furkandogmus/rag-retriever:latest
+IMG ?= ghcr.io/furkandogmus/kuberag:latest
+WORKER_IMG ?= ghcr.io/furkandogmus/kuberag-worker:latest
+RETRIEVER_IMG ?= ghcr.io/furkandogmus/kuberag-retriever:latest
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
 
 .PHONY: all
@@ -12,17 +12,23 @@ generate: ## Generate DeepCopy methods.
 
 .PHONY: manifests
 manifests: ## Generate CRD + RBAC manifests.
-	$(CONTROLLER_GEN) crd rbac:roleName=rag-operator-role paths="./..." \
+	$(CONTROLLER_GEN) crd rbac:roleName=kuberag-role paths="./..." \
 		output:crd:artifacts:config=config/crd \
 		output:rbac:artifacts:config=config/rbac
 
-.PHONY: fmt vet build test
+ENVTEST_VERSION ?= release-0.19
+ENVTEST_K8S_VERSION ?= 1.31.0
+
+.PHONY: fmt vet build test test-integration
 fmt:
 	go fmt ./...
 vet:
 	go vet ./...
 test: generate fmt vet ## Run Go unit tests.
 	go test ./...
+test-integration: generate ## Run envtest integration tests (downloads kube-apiserver/etcd).
+	KUBEBUILDER_ASSETS="$$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) use $(ENVTEST_K8S_VERSION) -p path)" \
+		go test -tags=integration -count=1 -timeout=300s ./internal/controller/...
 build: generate fmt vet ## Build the operator binary.
 	go build -o bin/manager ./cmd
 

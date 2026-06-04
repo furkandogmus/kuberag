@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go (build, lint, unit + integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (echo "::error::gofmt needed:"; gofmt -l .; exit 1)
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: generated artifacts up to date
+        run: |
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 object:headerFile=/dev/null paths="./api/..."
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 crd rbac:roleName=kuberag-role paths="./..." \
+            output:crd:artifacts:config=config/crd output:rbac:artifacts:config=config/rbac
+          git diff --exit-code || (echo "::error::CRD/RBAC/deepcopy out of date — run 'make manifests generate'"; exit 1)
+
+      - name: unit tests
+        run: go test -count=1 ./...
+
+      - name: integration tests (envtest)
+        run: |
+          export KUBEBUILDER_ASSETS="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19 use 1.31.0 -p path)"
+          go test -tags=integration -count=1 -timeout=300s ./internal/controller/...
+
+  python:
+    name: python (worker unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: worker tests
+        working-directory: worker
+        run: python -m unittest discover -s tests -v

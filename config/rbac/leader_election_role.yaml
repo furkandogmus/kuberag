@@ -2,8 +2,8 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: rag-operator-leader-election
-  namespace: rag-operator-system
+  name: kuberag-leader-election
+  namespace: kuberag-system
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -18,13 +18,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: rag-operator-leader-election
-  namespace: rag-operator-system
+  name: kuberag-leader-election
+  namespace: kuberag-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: rag-operator-leader-election
+  name: kuberag-leader-election
 subjects:
   - kind: ServiceAccount
-    name: rag-operator-controller-manager
-    namespace: rag-operator-system
+    name: kuberag-controller-manager
+    namespace: kuberag-system

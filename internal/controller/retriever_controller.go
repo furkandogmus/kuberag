@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	ragv1alpha1 "github.com/furkandogmus/rag-operator/api/v1alpha1"
+	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
 
 // RetrieverReconciler manages the serving Deployment + Service for a Retriever.
@@ -101,7 +101,7 @@ func boolPtrVal(b *bool, def bool) bool {
 
 func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase) *appsv1.Deployment {
 	labels := map[string]string{
-		labelManagedBy:             "rag-operator",
+		labelManagedBy:             "kuberag",
 		"rag.furkan.dev/retriever": rt.Name,
 	}
 	replicas := rt.Spec.Replicas
@@ -191,7 +191,7 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 
 func (r *RetrieverReconciler) desiredService(rt *ragv1alpha1.Retriever) *corev1.Service {
 	labels := map[string]string{
-		labelManagedBy:             "rag-operator",
+		labelManagedBy:             "kuberag",
 		"rag.furkan.dev/retriever": rt.Name,
 	}
 	return &corev1.Service{

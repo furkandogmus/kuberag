@@ -229,7 +229,7 @@ def fetch_web(src: dict) -> SourceDocs:
             continue
         seen.add(url)
         try:
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "rag-operator/1.0"})
+            resp = requests.get(url, timeout=15, headers={"User-Agent": "kuberag/1.0"})
         except requests.RequestException:
             continue
         if resp.status_code != 200 or "text/html" not in resp.headers.get("content-type", ""):

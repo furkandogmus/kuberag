@@ -1,4 +1,4 @@
-module github.com/furkandogmus/rag-operator
+module github.com/furkandogmus/kuberag
 
 go 1.26
 
