@@ -281,6 +281,24 @@ func TestSettleOnBest(t *testing.T) {
 	}
 }
 
+func TestChunkFingerprint(t *testing.T) {
+	a := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 800, Overlap: 80}
+	b := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 800, Overlap: 120}
+	// Stable for equal configs, distinct for different ones — this is what keeps a
+	// settle/revert re-index from colliding with the prior attempt's Job name.
+	if chunkFingerprint(a) != chunkFingerprint(a) {
+		t.Fatal("fingerprint must be stable for equal chunking")
+	}
+	if chunkFingerprint(a) == chunkFingerprint(b) {
+		t.Fatal("fingerprint must differ for different chunking")
+	}
+	// Strategy alone must change it (same sizes, different boundary model).
+	c := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 800, Overlap: 80}
+	if chunkFingerprint(a) == chunkFingerprint(c) {
+		t.Fatal("fingerprint must reflect the chunking strategy")
+	}
+}
+
 func TestEvalDue(t *testing.T) {
 	kb := baseKB()
 	// No retrievalQuality -> never.

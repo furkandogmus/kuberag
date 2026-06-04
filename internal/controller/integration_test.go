@@ -377,6 +377,85 @@ func TestKnowledgeBaseAutoTuneLoop(t *testing.T) {
 	})
 }
 
+// TestKnowledgeBaseAutoTuneRevertsToBest drives a *regressing* recall sequence so
+// the operator must, on exhaustion, re-index back to the best config it saw
+// (here the original default chunking) rather than settling on the worse last
+// ladder step. It also guards that the revert re-index does not collide on Job
+// name with the prior attempt (same AutoTuneAttempts, different chunking).
+func TestKnowledgeBaseAutoTuneRevertsToBest(t *testing.T) {
+	ns := newNamespace(t)
+	on := true
+	kb := sampleKB(ns, "revert")
+	kb.Spec.RetrievalQuality = &ragv1alpha1.RetrievalQualitySpec{
+		Enabled:              &on,
+		DatasetRef:           ragv1alpha1.LocalObjectRef{Name: "eval-ds"},
+		MinimumRecallPercent: 90,
+		AutoTune:             &ragv1alpha1.AutoTuneSpec{Enabled: &on, MaxAttempts: 2},
+	}
+	if err := k8sClient.Create(testCtx, kb); err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	waitActiveJob := func(jobType string) string {
+		var name string
+		eventually(t, 20*time.Second, func() error {
+			var got ragv1alpha1.KnowledgeBase
+			if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+				return err
+			}
+			if got.Status.ActiveJob == "" {
+				return fmt.Errorf("no active job yet (phase=%s)", got.Status.Phase)
+			}
+			var job batchv1.Job
+			if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: got.Status.ActiveJob}, &job); err != nil {
+				return err
+			}
+			if job.Labels[labelJobType] != jobType {
+				return fmt.Errorf("active job type=%s, want %s", job.Labels[labelJobType], jobType)
+			}
+			name = got.Status.ActiveJob
+			return nil
+		})
+		return name
+	}
+
+	// Initial ingest, then a sequence of evaluations whose recall *drops*: the
+	// best config is therefore the very first (default) chunking.
+	completeJob(t, ns, waitActiveJob(jobTypeIngest), `{"totalChunks":10,"sources":[{"name":"docs","revision":"r0","chunks":10}]}`)
+	completeJob(t, ns, waitActiveJob(jobTypeEval), `{"recallPercent":60,"queries":5}`) // best (default chunking)
+	completeJob(t, ns, waitActiveJob(jobTypeIngest), `{"totalChunks":11,"sources":[{"name":"docs","revision":"r1","chunks":11}]}`)
+	completeJob(t, ns, waitActiveJob(jobTypeEval), `{"recallPercent":40,"queries":5}`) // attempt 1: worse
+	completeJob(t, ns, waitActiveJob(jobTypeIngest), `{"totalChunks":12,"sources":[{"name":"docs","revision":"r2","chunks":12}]}`)
+	completeJob(t, ns, waitActiveJob(jobTypeEval), `{"recallPercent":30,"queries":5}`) // attempt 2: worse still, exhausted
+
+	// Exhausted: the operator reverts to best, which forces one more re-index whose
+	// Job name must NOT collide with attempt 2 (same attempt counter, but the
+	// chunk fingerprint differs).
+	revert := waitActiveJob(jobTypeIngest)
+	completeJob(t, ns, revert, `{"totalChunks":10,"sources":[{"name":"docs","revision":"r3","chunks":10}]}`)
+	// Re-eval on the reverted (best) config, still below target -> terminal Degraded.
+	completeJob(t, ns, waitActiveJob(jobTypeEval), `{"recallPercent":60,"queries":5}`)
+
+	eventually(t, 20*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.Phase != ragv1alpha1.PhaseDegraded {
+			return fmt.Errorf("phase=%s, want Degraded", got.Status.Phase)
+		}
+		if got.Status.BestRecallPercent != 60 {
+			return fmt.Errorf("bestRecallPercent=%d, want 60", got.Status.BestRecallPercent)
+		}
+		// Landed back on the original default chunking (the best config seen).
+		ec := got.Status.EffectiveChunking
+		if ec == nil || ec.Strategy != ragv1alpha1.ChunkSemantic || ec.MaxTokens != 800 || ec.Overlap != 80 {
+			return fmt.Errorf("did not revert to best (default) chunking: %+v", ec)
+		}
+		return nil
+	})
+}
+
 func TestCRDValidations(t *testing.T) {
 	ns := newNamespace(t)
 

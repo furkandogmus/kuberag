@@ -199,6 +199,11 @@ worse. The active values live in `status.effectiveChunking`; your `spec.chunking
 is left untouched. Editing `spec.chunking` yourself discards the override and
 resets both the attempt counter and the best-config memory.
 
+Auto-tune is also **self-healing**: once recall meets the target, the attempt
+budget resets (the winning `effectiveChunking` is kept). So if a later scheduled
+evaluation detects drift back below target, auto-tune re-engages from scratch —
+up to `maxAttempts` again — rather than being permanently exhausted.
+
 > Auto-tune only touches **chunking** — never the embedding model. If recall is
 > capped by model quality, switch models manually.
 

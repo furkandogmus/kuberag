@@ -237,6 +237,15 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 
 	if !below {
 		kb.Status.Phase = ragv1alpha1.PhaseReady
+		// Target met: this is a clean baseline. Reset the tuning budget and
+		// best-config memory (but keep the effective chunking that got us here) so
+		// that if a future scheduled eval detects drift below target, auto-tune can
+		// re-engage from scratch rather than being permanently exhausted.
+		kb.Status.AutoTuneAttempts = 0
+		kb.Status.BestChunking = nil
+		kb.Status.BestRecallPercent = 0
+		autoTuneAttempts.WithLabelValues(kb.Name).Set(0)
+		autoTuneBestRecall.WithLabelValues(kb.Name).Set(float64(result.RecallPercent))
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionTrue, "RecallMet",
 			fmt.Sprintf("recall %d%% >= target %d%%", result.RecallPercent, target))
 		r.event(kb, corev1.EventTypeNormal, "RecallMet", "recall %d%% meets target %d%%", result.RecallPercent, target)
@@ -471,6 +480,17 @@ func specHash(kb *ragv1alpha1.KnowledgeBase, secretsHash string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// chunkFingerprint is a short, stable fingerprint of an effective chunking
+// config. It disambiguates ingest Job names: a settle/revert re-index reuses the
+// same AutoTuneAttempts counter as the preceding attempt but re-indexes a
+// *different* chunking, so without folding the chunking in, the two Jobs would
+// collide on name. The colliding completed Job's result ConfigMap is already
+// gone, which would stall the loop.
+func chunkFingerprint(c ragv1alpha1.ChunkingSpec) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d", c.Strategy, c.MaxTokens, c.Overlap)))
+	return hex.EncodeToString(sum[:3])
+}
+
 // needsIngest decides whether the store is stale relative to the spec.
 func needsIngest(kb *ragv1alpha1.KnowledgeBase, desiredHash string) (reason string, need bool) {
 	if kb.Status.ObservedSpecHash == "" {
@@ -587,9 +607,11 @@ func applyAutoTune(kb *ragv1alpha1.KnowledgeBase) {
 	kb.Status.Evaluation = nil
 }
 
-// recordBest snapshots the effective chunking and recall whenever the just-run
-// evaluation matched or beat the best recall observed so far, so auto-tune can
-// later revert to the best configuration rather than the last ladder step.
+// recordBest snapshots the effective chunking and recall when nothing has been
+// recorded yet (first observation) or the just-run evaluation strictly beat the
+// best recall seen so far. Ties keep the earlier (cheaper, larger-chunk) config.
+// This lets auto-tune later revert to the best configuration rather than the last
+// ladder step.
 func recordBest(kb *ragv1alpha1.KnowledgeBase, recall int) {
 	if kb.Status.BestChunking == nil || recall > kb.Status.BestRecallPercent {
 		eff := effectiveChunking(kb)

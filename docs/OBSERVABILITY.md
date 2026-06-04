@@ -41,6 +41,7 @@ The manager serves Prometheus metrics on `:8080/metrics`.
 | `rag_knowledgebase_indexed_chunks` | `knowledgebase` | Chunks currently indexed. |
 | `rag_knowledgebase_recall_percent` | `knowledgebase` | Last measured recall@k. |
 | `rag_knowledgebase_autotune_attempts` | `knowledgebase` | Auto-tune iterations applied. |
+| `rag_knowledgebase_autotune_best_recall_percent` | `knowledgebase` | Best recall@k observed across auto-tune attempts (the config the KB reverts to if the target is never met). |
 
 Plus the standard controller-runtime metrics (`controller_runtime_reconcile_total`,
 `controller_runtime_reconcile_errors_total`, workqueue depth/latency, …).

@@ -47,7 +47,8 @@
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "targets": [
-        {"expr": "rag_knowledgebase_autotune_attempts{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "{{knowledgebase}}"}
+        {"expr": "rag_knowledgebase_autotune_attempts{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "attempts {{knowledgebase}}"},
+        {"expr": "rag_knowledgebase_autotune_best_recall_percent{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "best recall {{knowledgebase}}"}
       ]
     },
     {
