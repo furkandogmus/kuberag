@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -71,6 +72,18 @@ type RetrieverSpec struct {
 	// Image overrides the retriever server image.
 	// +optional
 	Image string `json:"image,omitempty"`
+	// Resources defines resource requirements for the retriever pod.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	// NodeSelector is a selector which must be true for the pod to fit on a node.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Tolerations allows the pod to tolerate node taints.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Affinity controls pod scheduling preferences.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
 // RetrieverStatus is the observed serving state.
@@ -115,8 +128,4 @@ type RetrieverList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Retriever `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&Retriever{}, &RetrieverList{})
 }

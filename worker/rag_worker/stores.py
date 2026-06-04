@@ -31,6 +31,9 @@ class VectorStore(ABC):
     @abstractmethod
     def drop(self) -> None: ...
 
+    def close(self) -> None:
+        pass
+
 
 def make_store(spec: dict) -> "VectorStore":
     vs = spec["vectorStore"]
@@ -129,6 +132,13 @@ class QdrantStore(VectorStore):
         if self._exists():
             self.client.delete_collection(self.collection)
 
+    def close(self) -> None:
+        if hasattr(self, "client") and self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+
 
 # --------------------------------------------------------------------------- #
 # pgvector
@@ -200,6 +210,10 @@ class PgVectorStore(VectorStore):
 
     def drop(self) -> None:
         self.conn.execute(f"DROP TABLE IF EXISTS {self.table}")
+
+    def close(self) -> None:
+        if hasattr(self, "conn") and self.conn:
+            self.conn.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -274,6 +288,13 @@ class MilvusStore(VectorStore):
     def drop(self) -> None:
         if self.client.has_collection(self.collection):
             self.client.drop_collection(self.collection)
+
+    def close(self) -> None:
+        if hasattr(self, "client") and self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
 
 
 def _sanitize(name: str) -> str:

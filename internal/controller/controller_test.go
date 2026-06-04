@@ -1,10 +1,14 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
@@ -212,5 +216,174 @@ func TestAutoTuneHelpers(t *testing.T) {
 	rq.AutoTune.MaxAttempts = 5
 	if autoTuneMax(rq) != 5 {
 		t.Fatalf("max attempts should be 5, got %d", autoTuneMax(rq))
+	}
+}
+
+func TestSecurityContextHardening(t *testing.T) {
+	kb := baseKB()
+	// Test baseJob security context and volumes
+	job := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	if job == nil {
+		t.Fatal("expected non-nil Job")
+	}
+
+	podSpec := job.Spec.Template.Spec
+	if podSpec.SecurityContext == nil || podSpec.SecurityContext.RunAsNonRoot == nil || !*podSpec.SecurityContext.RunAsNonRoot {
+		t.Error("expected Job pod security context with RunAsNonRoot=true")
+	}
+	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].Name != "scratch" {
+		t.Error("expected Job pod to have 'scratch' volume")
+	}
+
+	container := podSpec.Containers[0]
+	if container.SecurityContext == nil || container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
+		t.Error("expected Job container security context with AllowPrivilegeEscalation=false and ReadOnlyRootFilesystem=true")
+	}
+	if len(container.VolumeMounts) != 1 || container.VolumeMounts[0].Name != "scratch" || container.VolumeMounts[0].MountPath != "/scratch" {
+		t.Error("expected Job container to have 'scratch' volume mount at /scratch")
+	}
+
+	// Verify env vars
+	var hasHome bool
+	for _, env := range container.Env {
+		if env.Name == "HOME" && env.Value == "/scratch" {
+			hasHome = true
+		}
+	}
+	if !hasHome {
+		t.Error("expected Job container to have HOME=/scratch environment variable")
+	}
+
+	// Test desiredDeployment security context and volumes
+	rt := &ragv1alpha1.Retriever{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-rt", Namespace: "default"},
+		Spec: ragv1alpha1.RetrieverSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: "kb"},
+			Replicas:         1,
+		},
+	}
+	r := &RetrieverReconciler{}
+	dep := r.desiredDeployment(rt, kb, "test-hash-value")
+	if dep == nil {
+		t.Fatal("expected non-nil Deployment")
+	}
+
+	depPodSpec := dep.Spec.Template.Spec
+	if depPodSpec.SecurityContext == nil || depPodSpec.SecurityContext.RunAsNonRoot == nil || !*depPodSpec.SecurityContext.RunAsNonRoot {
+		t.Error("expected Deployment pod security context with RunAsNonRoot=true")
+	}
+	if len(depPodSpec.Volumes) != 1 || depPodSpec.Volumes[0].Name != "scratch" {
+		t.Error("expected Deployment pod to have 'scratch' volume")
+	}
+
+	depContainer := depPodSpec.Containers[0]
+	if depContainer.SecurityContext == nil || depContainer.SecurityContext.AllowPrivilegeEscalation == nil || *depContainer.SecurityContext.AllowPrivilegeEscalation || depContainer.SecurityContext.ReadOnlyRootFilesystem == nil || !*depContainer.SecurityContext.ReadOnlyRootFilesystem {
+		t.Error("expected Deployment container security context with AllowPrivilegeEscalation=false and ReadOnlyRootFilesystem=true")
+	}
+	if len(depContainer.VolumeMounts) != 1 || depContainer.VolumeMounts[0].Name != "scratch" || depContainer.VolumeMounts[0].MountPath != "/scratch" {
+		t.Error("expected Deployment container to have 'scratch' volume mount at /scratch")
+	}
+
+	var depHasHome bool
+	for _, env := range depContainer.Env {
+		if env.Name == "HOME" && env.Value == "/scratch" {
+			depHasHome = true
+		}
+	}
+	if !depHasHome {
+		t.Error("expected Deployment container to have HOME=/scratch environment variable")
+	}
+}
+
+func TestDeploymentSchedulingAndChecksums(t *testing.T) {
+	// 1. Test scheduling mapping for retriever deployment
+	kb := baseKB()
+	rt := &ragv1alpha1.Retriever{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-rt", Namespace: "default"},
+		Spec: ragv1alpha1.RetrieverSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: "kb"},
+			Replicas:         1,
+			NodeSelector:     map[string]string{"kubernetes.io/hostname": "gpu-node"},
+			Tolerations: []corev1.Toleration{
+				{Key: "gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+			},
+		},
+	}
+	r := &RetrieverReconciler{}
+	dep := r.desiredDeployment(rt, kb, "some-hash")
+	if dep == nil {
+		t.Fatal("expected non-nil Deployment")
+	}
+
+	depPodSpec := dep.Spec.Template.Spec
+	if depPodSpec.NodeSelector["kubernetes.io/hostname"] != "gpu-node" {
+		t.Error("expected NodeSelector to be mapped")
+	}
+	if len(depPodSpec.Tolerations) != 1 || depPodSpec.Tolerations[0].Key != "gpu" {
+		t.Error("expected Tolerations to be mapped")
+	}
+	if dep.Spec.Template.ObjectMeta.Annotations["checksum/secrets"] != "some-hash" {
+		t.Error("expected checksum annotation to be mapped")
+	}
+
+	// 2. Test scheduling mapping for baseJob
+	kb.Spec.Ingestion.NodeSelector = map[string]string{"kubernetes.io/hostname": "cpu-node"}
+	kb.Spec.Ingestion.Tolerations = []corev1.Toleration{
+		{Key: "cpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+	}
+
+	job := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	if job == nil {
+		t.Fatal("expected non-nil Job")
+	}
+	jobPodSpec := job.Spec.Template.Spec
+	if jobPodSpec.NodeSelector["kubernetes.io/hostname"] != "cpu-node" {
+		t.Error("expected Job NodeSelector to be mapped")
+	}
+	if len(jobPodSpec.Tolerations) != 1 || jobPodSpec.Tolerations[0].Key != "cpu" {
+		t.Error("expected Job Tolerations to be mapped")
+	}
+
+	// 3. Test computeSecretsHash with fake client
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ragv1alpha1.AddToScheme(scheme)
+
+	secret1 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vector-secret", Namespace: "default"},
+		Data:       map[string][]byte{"apiKey": []byte("vector-pass")},
+	}
+	secret2 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "gen-secret", Namespace: "default"},
+		Data:       map[string][]byte{"apiKey": []byte("gen-pass")},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1, secret2).Build()
+	r.Client = fakeClient
+
+	kb.Spec.VectorStore.CredentialsSecretRef = &ragv1alpha1.SecretKeyRef{
+		Name: "vector-secret",
+		Key:  "apiKey",
+	}
+	rt.Spec.Generation = &ragv1alpha1.GenerationSpec{
+		Enabled:  boolPtr(true),
+		Provider: "openai",
+		Model:    "gpt-4o",
+		APIKeySecretRef: &ragv1alpha1.SecretKeyRef{
+			Name: "gen-secret",
+			Key:  "apiKey",
+		},
+	}
+
+	hash1 := r.computeSecretsHash(context.Background(), rt, kb)
+
+	// Change secret value and verify hash changes
+	secret1.Data["apiKey"] = []byte("vector-pass-new")
+	fakeClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1, secret2).Build()
+	r.Client = fakeClient
+
+	hash2 := r.computeSecretsHash(context.Background(), rt, kb)
+	if hash1 == hash2 {
+		t.Error("expected secret checksum hash to change when secret data is updated")
 	}
 }

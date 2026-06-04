@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
@@ -164,6 +165,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 		{Name: "KB_NAMESPACE", Value: kb.Namespace},
 		{Name: "RESULT_CONFIGMAP", Value: resultConfigMapName(name)},
 	}
+	env = append(env, scratchEnv()...)
 	env = append(env, extraEnv...)
 	env = append(env, credentialEnv(kb)...)
 
@@ -185,6 +187,11 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: sa,
+					SecurityContext:    hardenedPodSecurityContext(),
+					Volumes:            []corev1.Volume{scratchVolume()},
+					NodeSelector:       kb.Spec.Ingestion.NodeSelector,
+					Tolerations:        kb.Spec.Ingestion.Tolerations,
+					Affinity:           kb.Spec.Ingestion.Affinity,
 					Containers: []corev1.Container{
 						{
 							Name:            "worker",
@@ -193,6 +200,8 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 							Args:            args,
 							Env:             env,
 							Resources:       resourceRequirements(kb.Spec.Ingestion.Resources),
+							SecurityContext: hardenedContainerSecurityContext(),
+							VolumeMounts:    []corev1.VolumeMount{scratchMount()},
 						},
 					},
 				},
@@ -285,4 +294,51 @@ func ignoreAlreadyExists(err error) error {
 		return nil
 	}
 	return err
+}
+
+// nonRootUID is distroless/nonroot's uid:gid; the worker/retriever run as it.
+const nonRootUID int64 = 65532
+
+// hardenedPodSecurityContext enforces non-root, fsGroup, and the default seccomp profile.
+func hardenedPodSecurityContext() *corev1.PodSecurityContext {
+	uid := nonRootUID
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot:   ptr.To(true),
+		RunAsUser:      &uid,
+		RunAsGroup:     &uid,
+		FSGroup:        &uid,
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
+// hardenedContainerSecurityContext drops all capabilities, forbids privilege
+// escalation, and runs with a read-only root filesystem (scratch is mounted).
+func hardenedContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr.To(false),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+}
+
+// scratchVolume / scratchMount give the read-only-rootfs containers a writable
+// place for clones, temp files, and model caches.
+func scratchVolume() corev1.Volume {
+	return corev1.Volume{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+}
+
+func scratchMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: "scratch", MountPath: "/scratch"}
+}
+
+// scratchEnv points HOME, caches, and temp dirs at the writable scratch mount.
+func scratchEnv() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "HOME", Value: "/scratch"},
+		{Name: "TMPDIR", Value: "/scratch"},
+		{Name: "XDG_CACHE_HOME", Value: "/scratch/.cache"},
+		{Name: "HF_HOME", Value: "/scratch/.cache/huggingface"},
+		{Name: "FASTEMBED_CACHE_PATH", Value: "/scratch/.cache/fastembed"},
+		{Name: "PYTHONDONTWRITEBYTECODE", Value: "1"},
+	}
 }

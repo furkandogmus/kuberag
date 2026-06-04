@@ -16,7 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -34,7 +34,7 @@ const (
 type KnowledgeBaseReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=knowledgebases,verbs=get;list;watch;create;update;patch;delete
@@ -388,7 +388,8 @@ func (r *KnowledgeBaseReconciler) event(obj runtime.Object, etype, reason, msg s
 	if r.Recorder == nil {
 		return
 	}
-	r.Recorder.Eventf(obj, etype, reason, msg, args...)
+	// New events API: regarding, related, eventtype, reason, action, note.
+	r.Recorder.Eventf(obj, nil, etype, reason, reason, msg, args...)
 }
 
 // ---------------------------------------------------------------------------

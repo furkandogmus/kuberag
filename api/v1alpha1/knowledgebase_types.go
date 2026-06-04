@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -225,6 +226,15 @@ type IngestionSpec struct {
 	// ServiceAccountName runs the ingestion Job under a specific SA (e.g. for IRSA).
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+	// NodeSelector is a selector which must be true for the pod to fit on a node.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Tolerations allows the pod to tolerate node taints.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Affinity controls pod scheduling preferences.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
 // ResourceRequirements is a trimmed mirror of core/v1 requests+limits.
@@ -402,8 +412,4 @@ type KnowledgeBaseList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []KnowledgeBase `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&KnowledgeBase{}, &KnowledgeBaseList{})
 }

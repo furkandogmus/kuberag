@@ -74,7 +74,3 @@ type VectorIndexList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []VectorIndex `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&VectorIndex{}, &VectorIndexList{})
-}

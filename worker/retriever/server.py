@@ -10,13 +10,24 @@ from __future__ import annotations
 
 import os
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 from rag_worker.embeddings import from_spec
 from rag_worker.stores import make_store
 
-app = FastAPI(title="kuberag-retriever")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    global _store
+    if _store is not None:
+        try:
+            _store.close()
+        except Exception:
+            pass
+
+app = FastAPI(title="kuberag-retriever", lifespan=lifespan)
 
 _DEFAULT_TOPK = int(os.environ.get("TOPK", "8"))
 _SCORE_THRESHOLD = int(os.environ.get("SCORE_THRESHOLD", "0")) / 100.0

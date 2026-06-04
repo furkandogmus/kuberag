@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,6 +17,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
@@ -29,6 +33,7 @@ type RetrieverReconciler struct {
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=retrievers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var rt ragv1alpha1.Retriever
@@ -49,7 +54,8 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	dep := r.desiredDeployment(&rt, &kb)
+	secretHash := r.computeSecretsHash(ctx, &rt, &kb)
+	dep := r.desiredDeployment(&rt, &kb, secretHash)
 	if err := controllerutil.SetControllerReference(&rt, dep, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -85,6 +91,43 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, r.Status().Update(ctx, &rt)
 }
 
+func (r *RetrieverReconciler) computeSecretsHash(ctx context.Context, rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase) string {
+	hasher := sha256.New()
+
+	// 1. kb.Spec.VectorStore.CredentialsSecretRef
+	if ref := kb.Spec.VectorStore.CredentialsSecretRef; ref != nil {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+			if val, ok := sec.Data[ref.Key]; ok {
+				hasher.Write(val)
+			}
+		}
+	}
+
+	// 2. kb.Spec.Embedding.APIKeySecretRef
+	if ref := kb.Spec.Embedding.APIKeySecretRef; ref != nil {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+			if val, ok := sec.Data[ref.Key]; ok {
+				hasher.Write(val)
+			}
+		}
+	}
+
+	// 3. rt.Spec.Generation.APIKeySecretRef
+	if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil {
+		ref := rt.Spec.Generation.APIKeySecretRef
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: rt.Namespace, Name: ref.Name}, &sec); err == nil {
+			if val, ok := sec.Data[ref.Key]; ok {
+				hasher.Write(val)
+			}
+		}
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 func retrieverImage(rt *ragv1alpha1.Retriever) string {
 	if rt.Spec.Image != "" {
 		return rt.Spec.Image
@@ -99,7 +142,7 @@ func boolPtrVal(b *bool, def bool) bool {
 	return *b
 }
 
-func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase) *appsv1.Deployment {
+func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase, secretHash string) *appsv1.Deployment {
 	labels := map[string]string{
 		labelManagedBy:             "kuberag",
 		"rag.furkan.dev/retriever": rt.Name,
@@ -152,6 +195,13 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		}
 	}
 
+	env = append(env, scratchEnv()...)
+
+	var resources corev1.ResourceRequirements
+	if rt.Spec.Resources != nil {
+		resources = *rt.Spec.Resources
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rt.Name + "-retriever",
@@ -162,8 +212,18 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						"checksum/secrets": secretHash,
+					},
+				},
 				Spec: corev1.PodSpec{
+					SecurityContext: hardenedPodSecurityContext(),
+					Volumes:         []corev1.Volume{scratchVolume()},
+					NodeSelector:    rt.Spec.NodeSelector,
+					Tolerations:     rt.Spec.Tolerations,
+					Affinity:        rt.Spec.Affinity,
 					Containers: []corev1.Container{
 						{
 							Name:            "retriever",
@@ -171,6 +231,9 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Ports:           []corev1.ContainerPort{{ContainerPort: 8000, Name: "http"}},
 							Env:             env,
+							Resources:       resources,
+							SecurityContext: hardenedContainerSecurityContext(),
+							VolumeMounts:    []corev1.VolumeMount{scratchMount()},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
@@ -253,5 +316,69 @@ func (r *RetrieverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&ragv1alpha1.Retriever{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Watches(
+			&ragv1alpha1.KnowledgeBase{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				kb, ok := obj.(*ragv1alpha1.KnowledgeBase)
+				if !ok {
+					return nil
+				}
+				var list ragv1alpha1.RetrieverList
+				if err := r.List(ctx, &list, client.InNamespace(kb.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []reconcile.Request
+				for _, rt := range list.Items {
+					if rt.Spec.KnowledgeBaseRef.Name == kb.Name {
+						reqs = append(reqs, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Namespace: rt.Namespace,
+								Name:      rt.Name,
+							},
+						})
+					}
+				}
+				return reqs
+			}),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				secret, ok := obj.(*corev1.Secret)
+				if !ok {
+					return nil
+				}
+				var list ragv1alpha1.RetrieverList
+				if err := r.List(ctx, &list, client.InNamespace(secret.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []reconcile.Request
+				for _, rt := range list.Items {
+					var kb ragv1alpha1.KnowledgeBase
+					kbKey := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Spec.KnowledgeBaseRef.Name}
+					if err := r.Get(ctx, kbKey, &kb); err == nil {
+						referenced := false
+						if kb.Spec.VectorStore.CredentialsSecretRef != nil && kb.Spec.VectorStore.CredentialsSecretRef.Name == secret.Name {
+							referenced = true
+						}
+						if kb.Spec.Embedding.APIKeySecretRef != nil && kb.Spec.Embedding.APIKeySecretRef.Name == secret.Name {
+							referenced = true
+						}
+						if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil && rt.Spec.Generation.APIKeySecretRef.Name == secret.Name {
+							referenced = true
+						}
+						if referenced {
+							reqs = append(reqs, reconcile.Request{
+								NamespacedName: types.NamespacedName{
+									Namespace: rt.Namespace,
+									Name:      rt.Name,
+								},
+							})
+						}
+					}
+				}
+				return reqs
+			}),
+		).
 		Complete(r)
 }

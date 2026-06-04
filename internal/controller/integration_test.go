@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
 		fmt.Printf("manager: %v\n", err)
 		os.Exit(1)
 	}
-	mustSetup(mgr, &KnowledgeBaseReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorderFor("kb")})
+	mustSetup(mgr, &KnowledgeBaseReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Recorder: mgr.GetEventRecorder("kb")})
 	mustSetup(mgr, &RetrieverReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()})
 	mustSetup(mgr, &VectorIndexReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()})
 
