@@ -26,7 +26,7 @@ class VectorStore(ABC):
     def count(self) -> int: ...
 
     @abstractmethod
-    def search(self, vector: list[float], topk: int) -> list[dict]: ...
+    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]: ...
 
     @abstractmethod
     def drop(self) -> None: ...
@@ -124,8 +124,21 @@ class QdrantStore(VectorStore):
     def count(self) -> int:
         return self.client.count(self.collection, exact=True).count
 
-    def search(self, vector: list[float], topk: int) -> list[dict]:
-        hits = self.client.search(self.collection, query_vector=vector, limit=topk, with_payload=True)
+    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]:
+        from qdrant_client import models
+
+        query_filter = None
+        if source is not None:
+            query_filter = models.Filter(must=[
+                models.FieldCondition(key="source", match=models.MatchValue(value=source))
+            ])
+        hits = self.client.search(
+            self.collection,
+            query_vector=vector,
+            limit=topk,
+            query_filter=query_filter,
+            with_payload=True,
+        )
         return [{"score": h.score, "payload": h.payload} for h in hits]
 
     def drop(self) -> None:
@@ -195,17 +208,24 @@ class PgVectorStore(VectorStore):
     def count(self) -> int:
         return self.conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0]
 
-    def search(self, vector: list[float], topk: int) -> list[dict]:
+    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]:
         op = self._ORDER[self.distance]
         vec = "[" + ",".join(map(str, vector)) + "]"
-        rows = self.conn.execute(
-            f"SELECT source, doc_path, text, embedding {op} %s AS dist "
-            f"FROM {self.table} ORDER BY dist ASC LIMIT %s",
-            (vec, topk),
-        ).fetchall()
+        if source is not None:
+            rows = self.conn.execute(
+                f"SELECT source, doc_path, text, embedding {op} %s AS dist "
+                f"FROM {self.table} WHERE source = %s ORDER BY dist ASC LIMIT %s",
+                (vec, source, topk),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                f"SELECT source, doc_path, text, embedding {op} %s AS dist "
+                f"FROM {self.table} ORDER BY dist ASC LIMIT %s",
+                (vec, topk),
+            ).fetchall()
         out = []
-        for source, doc_path, text, dist in rows:
-            out.append({"score": 1.0 - float(dist), "payload": {"source": source, "doc_path": doc_path, "text": text}})
+        for src, doc_path, text, dist in rows:
+            out.append({"score": 1.0 - float(dist), "payload": {"source": src, "doc_path": doc_path, "text": text}})
         return out
 
     def drop(self) -> None:
@@ -278,9 +298,11 @@ class MilvusStore(VectorStore):
             time.sleep(1)
         return n
 
-    def search(self, vector: list[float], topk: int) -> list[dict]:
+    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]:
+        expr = f'source == "{source}"' if source is not None else None
         res = self.client.search(
             self.collection, data=[vector], limit=topk,
+            filter=expr,
             output_fields=["source", "doc_path", "text"],
         )[0]
         return [{"score": h["distance"], "payload": h["entity"]} for h in res]

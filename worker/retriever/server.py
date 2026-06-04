@@ -96,23 +96,32 @@ def _ensure() -> None:
         _gen_client = OpenAI(base_url=base_url, api_key=os.environ.get("GEN_API_KEY") or "no-key")
 
 
-def _generate(question: str, chunks: list["Chunk"]) -> str:
+def _generate(question: str, chunks: list[Chunk], history: list[Message] | None = None) -> str:
     context = "\n\n".join(f"[{c.docPath}]\n{c.text}" for c in chunks)
     system = os.environ.get("GEN_SYSTEM_PROMPT") or _DEFAULT_SYSTEM_PROMPT
+    messages = [{"role": "system", "content": system}]
+    if history:
+        for msg in history:
+            messages.append({"role": msg.role, "content": msg.content})
+    messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"})
     resp = _gen_client.chat.completions.create(
         model=os.environ["GEN_MODEL"],
         max_tokens=int(os.environ.get("GEN_MAX_TOKENS", "512")),
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
-        ],
+        messages=messages,
     )
     return resp.choices[0].message.content or ""
+
+
+class Message(BaseModel):
+    role: str
+    content: str
 
 
 class QueryRequest(BaseModel):
     query: str
     topK: int | None = None
+    source: str | None = None
+    history: list[Message] | None = None
 
 
 class Chunk(BaseModel):
@@ -140,7 +149,7 @@ def query(req: QueryRequest) -> QueryResponse:
     # Over-fetch when reranking so the cross-encoder has candidates to reorder.
     fetch_k = topk * 4 if _RERANK else topk
     qv = _embedder.embed_query(req.query)
-    hits = _store.search(qv, fetch_k)
+    hits = _store.search(qv, fetch_k, source=req.source)
 
     if _RERANK and hits:
         scores = list(_reranker.rerank(req.query, [h["payload"].get("text", "") for h in hits]))
@@ -163,7 +172,7 @@ def query(req: QueryRequest) -> QueryResponse:
     answer = None
     if _GEN_ENABLED and results:
         try:
-            answer = _generate(req.query, results)
+            answer = _generate(req.query, results, req.history)
         except Exception as e:
             # Generation is best-effort: never fail retrieval because the LLM
             # call errored (quota, timeout, bad model). Surface the reason.
