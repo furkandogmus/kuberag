@@ -178,18 +178,26 @@ appear in the top-`topK` retrieved chunks.
 ### How auto-tune actually adjusts chunking
 
 When measured recall < `minimumRecallPercent` and `autoTune.enabled` is true, on
-each attempt the operator (see `applyAutoTune` in the controller):
+each attempt the operator walks a ladder (see `nextChunking` in the controller):
 
 1. **Grows overlap** by `+40` tokens.
 2. Once overlap exceeds half of `maxTokens`, it **shrinks `maxTokens` by `200`**
    (floor 300) and resets overlap to `maxTokens / 5` — i.e. finer-grained chunks.
-3. Clears the spec hash to **force a re-index** with the tuned chunking, then
+3. Once chunks are at the floor and overlap can no longer grow, it **rotates the
+   split strategy** (`semantic → recursive → fixed → semantic`) and resets
+   size/overlap — attacking the corpus with a different boundary model instead of
+   churning the same tiny chunks.
+4. Clears the spec hash to **force a re-index** with the tuned chunking, then
    re-evaluates.
 
-It repeats up to `maxAttempts`. If still short, the KB goes **`Degraded`**. The
-tuned values land in `status.effectiveChunking` (your `spec.chunking` is left
-untouched). Editing `spec.chunking` yourself discards the override and resets the
-attempt counter.
+It repeats up to `maxAttempts`. Recall isn't monotone along this ladder, so the
+operator **remembers the best configuration it sees** — recorded in
+`status.bestChunking` / `status.bestRecallPercent`. If the target is never met,
+auto-tune **reverts to that best config** (one final re-index) before the KB goes
+**`Degraded`**, so you're never left on an arbitrary last step that happened to be
+worse. The active values live in `status.effectiveChunking`; your `spec.chunking`
+is left untouched. Editing `spec.chunking` yourself discards the override and
+resets both the attempt counter and the best-config memory.
 
 > Auto-tune only touches **chunking** — never the embedding model. If recall is
 > capped by model quality, switch models manually.

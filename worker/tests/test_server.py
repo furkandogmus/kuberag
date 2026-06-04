@@ -311,6 +311,12 @@ class TestRetrieverServer(unittest.TestCase):
         })
         self.assertEqual(resp.status_code, 422)
 
+    def test_playground(self):
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/html", resp.headers["content-type"])
+        self.assertIn("kuberag | RAG Playground", resp.text)
+
 
 if __name__ == "__main__":
     unittest.main()

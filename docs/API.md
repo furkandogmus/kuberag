@@ -62,7 +62,9 @@ The desired knowledge state.
 
 `phase` (`Pending`/`Ingesting`/`Ready`/`Degraded`/`Failed`/`Suspended`),
 `observedSpecHash`, `observedEmbeddingModel`, `effectiveChunking` (auto-tune
-override), `autoTuneAttempts`, `evalRound`, `lastIndexedTime`, `indexedChunks`,
+override), `autoTuneAttempts`, `bestChunking` / `bestRecallPercent` (best config
+auto-tune observed; the KB is reverted here if the target is never met),
+`evalRound`, `lastIndexedTime`, `indexedChunks`,
 `sources[]` (per-source revision + chunk count), `evaluation`
 (`recallPercent`, `p95LatencyMillis`, `queries`, `time`), `activeJob`,
 `conditions[]` (`Ready`, `Ingesting`, `Evaluated`).

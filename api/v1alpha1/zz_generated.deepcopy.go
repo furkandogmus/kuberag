@@ -287,6 +287,11 @@ func (in *KnowledgeBaseStatus) DeepCopyInto(out *KnowledgeBaseStatus) {
 		*out = new(ChunkingSpec)
 		**out = **in
 	}
+	if in.BestChunking != nil {
+		in, out := &in.BestChunking, &out.BestChunking
+		*out = new(ChunkingSpec)
+		**out = **in
+	}
 	if in.LastIndexedTime != nil {
 		in, out := &in.LastIndexedTime, &out.LastIndexedTime
 		*out = (*in).DeepCopy()

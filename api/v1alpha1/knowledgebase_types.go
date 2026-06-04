@@ -368,6 +368,14 @@ type KnowledgeBaseStatus struct {
 	// AutoTuneAttempts counts auto-tune iterations applied so far.
 	// +optional
 	AutoTuneAttempts int `json:"autoTuneAttempts,omitempty"`
+	// BestRecallPercent is the highest recall observed across auto-tune attempts.
+	// +optional
+	BestRecallPercent int `json:"bestRecallPercent,omitempty"`
+	// BestChunking is the chunking that achieved BestRecallPercent. When auto-tune
+	// exhausts its attempts without meeting the target, the operator lands the KB
+	// on this configuration rather than the last (arbitrary) ladder step.
+	// +optional
+	BestChunking *ChunkingSpec `json:"bestChunking,omitempty"`
 	// EvalRound increments per evaluation run so each eval Job gets a unique name
 	// (the spec hash alone is stable across repeated evaluations).
 	// +optional

@@ -184,6 +184,103 @@ func TestApplyAutoTune(t *testing.T) {
 	}
 }
 
+func TestNextChunking(t *testing.T) {
+	// Early steps grow overlap toward maxTokens/2.
+	c := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 800, Overlap: 80}
+	c = nextChunking(c)
+	if c.Overlap != 120 || c.MaxTokens != 800 || c.Strategy != ragv1alpha1.ChunkSemantic {
+		t.Fatalf("first step should grow overlap only: %+v", c)
+	}
+
+	// Drive the ladder to the floor; maxTokens must never breach chunkFloor and
+	// the strategy must eventually rotate to a different boundary model.
+	c = ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 800, Overlap: 80}
+	rotated := false
+	for i := 0; i < 50; i++ {
+		c = nextChunking(c)
+		if c.MaxTokens < chunkFloor {
+			t.Fatalf("maxTokens %d breached floor %d at step %d", c.MaxTokens, chunkFloor, i)
+		}
+		if c.Strategy != ragv1alpha1.ChunkSemantic {
+			rotated = true
+			break
+		}
+	}
+	if !rotated {
+		t.Fatal("ladder never rotated strategy after exhausting chunk size")
+	}
+
+	// Strategy rotation cycles semantic -> recursive -> fixed -> semantic.
+	if got := rotateStrategy(ragv1alpha1.ChunkSemantic); got != ragv1alpha1.ChunkRecursive {
+		t.Fatalf("semantic should rotate to recursive, got %q", got)
+	}
+	if got := rotateStrategy(ragv1alpha1.ChunkRecursive); got != ragv1alpha1.ChunkFixed {
+		t.Fatalf("recursive should rotate to fixed, got %q", got)
+	}
+	if got := rotateStrategy(ragv1alpha1.ChunkFixed); got != ragv1alpha1.ChunkSemantic {
+		t.Fatalf("fixed should rotate back to semantic, got %q", got)
+	}
+}
+
+func TestRecordBest(t *testing.T) {
+	kb := baseKB()
+	// First observation seeds the best, whatever the recall.
+	recordBest(kb, 40)
+	if kb.Status.BestChunking == nil || kb.Status.BestRecallPercent != 40 {
+		t.Fatalf("first observation should seed best: %d %+v", kb.Status.BestRecallPercent, kb.Status.BestChunking)
+	}
+	seeded := *kb.Status.BestChunking
+
+	// A better recall on a different config updates both.
+	tuned := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 600, Overlap: 120}
+	kb.Status.EffectiveChunking = &tuned
+	recordBest(kb, 70)
+	if kb.Status.BestRecallPercent != 70 || *kb.Status.BestChunking != tuned {
+		t.Fatalf("better recall should update best: %d %+v", kb.Status.BestRecallPercent, kb.Status.BestChunking)
+	}
+
+	// A regression must not overwrite the best.
+	worse := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 300, Overlap: 60}
+	kb.Status.EffectiveChunking = &worse
+	recordBest(kb, 55)
+	if kb.Status.BestRecallPercent != 70 || *kb.Status.BestChunking != tuned {
+		t.Fatalf("regression must not overwrite best: %d %+v", kb.Status.BestRecallPercent, kb.Status.BestChunking)
+	}
+	_ = seeded
+}
+
+func TestSettleOnBest(t *testing.T) {
+	// No best recorded -> nothing to settle on.
+	kb := baseKB()
+	if settleOnBest(kb) {
+		t.Fatal("settleOnBest should be a no-op without a recorded best")
+	}
+
+	// Best differs from current -> revert and force a re-index + re-eval.
+	best := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 600, Overlap: 120}
+	kb.Status.BestChunking = &best
+	kb.Status.BestRecallPercent = 70
+	current := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 300, Overlap: 60}
+	kb.Status.EffectiveChunking = &current
+	kb.Status.ObservedSpecHash = "abc"
+	now := metav1.Now()
+	kb.Status.Evaluation = &ragv1alpha1.EvaluationStatus{Time: &now}
+	if !settleOnBest(kb) {
+		t.Fatal("settleOnBest should revert when current differs from best")
+	}
+	if *kb.Status.EffectiveChunking != best {
+		t.Fatalf("effective chunking should be reverted to best: %+v", kb.Status.EffectiveChunking)
+	}
+	if kb.Status.ObservedSpecHash != "" || kb.Status.Evaluation != nil {
+		t.Fatal("settleOnBest must clear spec hash and evaluation to force re-index + re-eval")
+	}
+
+	// Already on best -> no-op (this is how the settle loop terminates).
+	if settleOnBest(kb) {
+		t.Fatal("settleOnBest should be a no-op once already on best")
+	}
+}
+
 func TestEvalDue(t *testing.T) {
 	kb := baseKB()
 	// No retrievalQuality -> never.

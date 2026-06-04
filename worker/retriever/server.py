@@ -14,6 +14,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Literal
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from rag_worker.embeddings import from_spec
@@ -195,6 +196,13 @@ class QueryResponse(BaseModel):
     query: str
     results: list[Chunk]
     answer: str | None = None
+
+
+@app.get("/", response_class=HTMLResponse)
+def playground() -> HTMLResponse:
+    html_path = os.path.join(os.path.dirname(__file__), "playground.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 
 @app.get("/healthz")

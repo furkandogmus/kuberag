@@ -95,6 +95,8 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if kb.Status.ObservedSpecHash != "" && kb.Status.ObservedSpecHash != hash && kb.Status.EffectiveChunking != nil {
 		kb.Status.EffectiveChunking = nil
 		kb.Status.AutoTuneAttempts = 0
+		kb.Status.BestChunking = nil
+		kb.Status.BestRecallPercent = 0
 	}
 	eff := effectiveChunking(&kb)
 
@@ -241,27 +243,47 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
 	}
 
-	// Below target.
-	if autoTuneEnabled(rq) && kb.Status.AutoTuneAttempts < autoTuneMax(rq) {
-		applyAutoTune(kb)
-		autoTuneAttempts.WithLabelValues(kb.Name).Set(float64(kb.Status.AutoTuneAttempts))
-		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "AutoTuning",
-			fmt.Sprintf("recall %d%% < target %d%%; tuning chunking (attempt %d)",
-				result.RecallPercent, target, kb.Status.AutoTuneAttempts))
-		r.event(kb, corev1.EventTypeNormal, "AutoTuning",
-			"recall %d%% below target %d%%, re-indexing with tuned chunking (attempt %d/%d)",
-			result.RecallPercent, target, kb.Status.AutoTuneAttempts, autoTuneMax(rq))
-		// Re-index will be triggered next pass because ObservedSpecHash was cleared.
-		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+	// Below target. Remember the best config we've seen before stepping further,
+	// so auto-tune can land on it later even if subsequent steps regress.
+	recordBest(kb, result.RecallPercent)
+	autoTuneBestRecall.WithLabelValues(kb.Name).Set(float64(kb.Status.BestRecallPercent))
+
+	if autoTuneEnabled(rq) {
+		if kb.Status.AutoTuneAttempts < autoTuneMax(rq) {
+			applyAutoTune(kb)
+			autoTuneAttempts.WithLabelValues(kb.Name).Set(float64(kb.Status.AutoTuneAttempts))
+			setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "AutoTuning",
+				fmt.Sprintf("recall %d%% < target %d%%; tuning chunking (attempt %d)",
+					result.RecallPercent, target, kb.Status.AutoTuneAttempts))
+			r.event(kb, corev1.EventTypeNormal, "AutoTuning",
+				"recall %d%% below target %d%%, re-indexing with tuned chunking (attempt %d/%d)",
+				result.RecallPercent, target, kb.Status.AutoTuneAttempts, autoTuneMax(rq))
+			// Re-index will be triggered next pass because ObservedSpecHash was cleared.
+			return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+		}
+
+		// Attempts exhausted. Land on the best config observed rather than the
+		// last (arbitrary) ladder step. settleOnBest forces one final re-index;
+		// the subsequent re-eval finds current == best and falls through to Degraded.
+		if settleOnBest(kb) {
+			setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "AutoTuneSettling",
+				fmt.Sprintf("auto-tune exhausted; reverting to best config (recall %d%%)",
+					kb.Status.BestRecallPercent))
+			r.event(kb, corev1.EventTypeNormal, "AutoTuneSettling",
+				"auto-tune exhausted, re-indexing with best config seen (recall %d%% < target %d%%)",
+				kb.Status.BestRecallPercent, target)
+			return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+		}
 	}
 
 	kb.Status.Phase = ragv1alpha1.PhaseDegraded
 	setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse, "RecallBelowTarget",
-		fmt.Sprintf("recall %d%% < target %d%%", result.RecallPercent, target))
+		fmt.Sprintf("recall %d%% < target %d%% (best %d%%)", result.RecallPercent, target, kb.Status.BestRecallPercent))
 	setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "RecallBelowTarget",
-		fmt.Sprintf("recall %d%% < target %d%%", result.RecallPercent, target))
+		fmt.Sprintf("recall %d%% < target %d%% (best %d%%)", result.RecallPercent, target, kb.Status.BestRecallPercent))
 	r.event(kb, corev1.EventTypeWarning, "RecallBelowTarget",
-		"recall %d%% below target %d%% and auto-tune exhausted", result.RecallPercent, target)
+		"recall %d%% below target %d%% and auto-tune exhausted (best %d%%)",
+		result.RecallPercent, target, kb.Status.BestRecallPercent)
 	return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
 }
 
@@ -506,25 +528,88 @@ func nextEvalFire(kb *ragv1alpha1.KnowledgeBase, now time.Time) time.Time {
 	return nextFire(kb.Spec.RetrievalQuality.EvalSchedule, now)
 }
 
-// applyAutoTune adjusts effective chunking to chase a higher recall and forces
-// a re-index by clearing the observed spec hash.
-func applyAutoTune(kb *ragv1alpha1.KnowledgeBase) {
-	eff := effectiveChunking(kb)
-	// Strategy: grow overlap first; once overlap is large relative to chunk size,
-	// shrink the chunk to increase granularity.
-	eff.Overlap += 40
-	if eff.Overlap > eff.MaxTokens/2 {
-		if eff.MaxTokens > 300 {
-			eff.MaxTokens -= 200
-		}
-		eff.Overlap = eff.MaxTokens / 5
+// chunkFloor is the smallest maxTokens auto-tune will shrink a chunk to.
+const chunkFloor = 300
+
+// nextChunking is the pure auto-tune ladder: it returns the next chunking to try.
+//
+//  1. Grow overlap (+40) to stop answers being cut across chunk boundaries.
+//  2. Once overlap dominates the chunk, shrink maxTokens (-200, floor 300) and
+//     reset overlap to maxTokens/5 — finer-grained, more precise chunks.
+//  3. Once chunks are at the floor and overlap already dominates, rotate the
+//     split strategy and reset size/overlap — attack the corpus with a different
+//     boundary model instead of shrinking further.
+func nextChunking(c ragv1alpha1.ChunkingSpec) ragv1alpha1.ChunkingSpec {
+	// At the chunk-size floor with overlap that can no longer grow without
+	// dominating: the size ladder is exhausted, so rotate the split strategy and
+	// reset size/overlap rather than churning the same small chunks.
+	if c.MaxTokens <= chunkFloor && c.Overlap+40 > c.MaxTokens/2 {
+		c.Strategy = rotateStrategy(c.Strategy)
+		c.MaxTokens = 800
+		c.Overlap = 80
+		return c
 	}
+	c.Overlap += 40
+	if c.Overlap > c.MaxTokens/2 {
+		if c.MaxTokens > chunkFloor {
+			c.MaxTokens -= 200
+			if c.MaxTokens < chunkFloor {
+				c.MaxTokens = chunkFloor
+			}
+		}
+		c.Overlap = c.MaxTokens / 5
+	}
+	return c
+}
+
+// rotateStrategy cycles through the available split strategies so auto-tune can
+// explore boundary models, not just chunk sizes.
+func rotateStrategy(s ragv1alpha1.ChunkingStrategy) ragv1alpha1.ChunkingStrategy {
+	switch s {
+	case ragv1alpha1.ChunkSemantic:
+		return ragv1alpha1.ChunkRecursive
+	case ragv1alpha1.ChunkRecursive:
+		return ragv1alpha1.ChunkFixed
+	default:
+		return ragv1alpha1.ChunkSemantic
+	}
+}
+
+// applyAutoTune steps the effective chunking along the ladder and forces a
+// re-index by clearing the observed spec hash.
+func applyAutoTune(kb *ragv1alpha1.KnowledgeBase) {
+	eff := nextChunking(effectiveChunking(kb))
 	kb.Status.EffectiveChunking = &eff
 	kb.Status.AutoTuneAttempts++
 	kb.Status.ObservedSpecHash = "" // forces re-ingest on next pass
 	// Clear the last evaluation so a re-eval runs after the tuned re-index even
 	// when no evalSchedule is set; this lets auto-tune iterate up to maxAttempts.
 	kb.Status.Evaluation = nil
+}
+
+// recordBest snapshots the effective chunking and recall whenever the just-run
+// evaluation matched or beat the best recall observed so far, so auto-tune can
+// later revert to the best configuration rather than the last ladder step.
+func recordBest(kb *ragv1alpha1.KnowledgeBase, recall int) {
+	if kb.Status.BestChunking == nil || recall > kb.Status.BestRecallPercent {
+		eff := effectiveChunking(kb)
+		kb.Status.BestChunking = &eff
+		kb.Status.BestRecallPercent = recall
+	}
+}
+
+// settleOnBest reverts effective chunking to the best-observed config and forces
+// one final re-index, unless the KB is already on it. Returns whether a revert
+// was scheduled.
+func settleOnBest(kb *ragv1alpha1.KnowledgeBase) bool {
+	if kb.Status.BestChunking == nil || effectiveChunking(kb) == *kb.Status.BestChunking {
+		return false
+	}
+	best := *kb.Status.BestChunking
+	kb.Status.EffectiveChunking = &best
+	kb.Status.ObservedSpecHash = "" // forces re-ingest on next pass
+	kb.Status.Evaluation = nil      // forces a re-eval after the re-index
+	return true
 }
 
 func autoTuneEnabled(rq *ragv1alpha1.RetrievalQualitySpec) bool {

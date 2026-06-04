@@ -1389,6 +1389,36 @@ spec:
                 description: AutoTuneAttempts counts auto-tune iterations applied
                   so far.
                 type: integer
+              bestChunking:
+                description: |-
+                  BestChunking is the chunking that achieved BestRecallPercent. When auto-tune
+                  exhausts its attempts without meeting the target, the operator lands the KB
+                  on this configuration rather than the last (arbitrary) ladder step.
+                properties:
+                  maxTokens:
+                    default: 800
+                    minimum: 1
+                    type: integer
+                  overlap:
+                    default: 80
+                    minimum: 0
+                    type: integer
+                  strategy:
+                    default: semantic
+                    description: ChunkingStrategy enumerates how documents get split.
+                    enum:
+                    - semantic
+                    - recursive
+                    - fixed
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: overlap must be strictly less than maxTokens
+                  rule: self.overlap < self.maxTokens
+              bestRecallPercent:
+                description: BestRecallPercent is the highest recall observed across
+                  auto-tune attempts.
+                type: integer
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

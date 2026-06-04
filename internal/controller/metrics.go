@@ -41,8 +41,19 @@ var (
 		},
 		[]string{"knowledgebase"},
 	)
+
+	// autoTuneBestRecall reports the best recall observed across auto-tune attempts.
+	autoTuneBestRecall = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "rag_knowledgebase_autotune_best_recall_percent",
+			Help: "Best retrieval recall@k observed across auto-tune attempts.",
+		},
+		[]string{"knowledgebase"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(ingestionsTotal, indexedChunks, retrievalRecall, autoTuneAttempts)
+	metrics.Registry.MustRegister(
+		ingestionsTotal, indexedChunks, retrievalRecall, autoTuneAttempts, autoTuneBestRecall,
+	)
 }

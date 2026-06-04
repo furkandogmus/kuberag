@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>kuberag | RAG Playground</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-main: #0b0f19;
+      --bg-panel: rgba(20, 27, 45, 0.7);
+      --bg-card: rgba(30, 41, 69, 0.4);
+      --border-color: rgba(51, 65, 85, 0.5);
+      --border-glow: rgba(6, 182, 212, 0.3);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent-cyan: #06b6d4;
+      --accent-purple: #8b5cf6;
+      --accent-green: #10b981;
+      --shadow-glow: 0 0 20px rgba(6, 182, 212, 0.15);
+      --font-title: 'Outfit', sans-serif;
+      --font-body: 'Plus Jakarta Sans', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      font-family: var(--font-body);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(6, 182, 212, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(139, 92, 246, 0.05) 0%, transparent 40%);
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1.25rem 2rem;
+      border-bottom: 1px solid var(--border-color);
+      background-color: rgba(11, 15, 25, 0.8);
+      backdrop-filter: blur(12px);
+      z-index: 10;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-logo {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 0.5rem;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
+    }
+
+    .brand-logo svg {
+      width: 1.25rem;
+      height: 1.25rem;
+      fill: var(--text-main);
+    }
+
+    .brand-name {
+      font-family: var(--font-title);
+      font-weight: 700;
+      font-size: 1.35rem;
+      letter-spacing: -0.02em;
+      background: linear-gradient(to right, #ffffff, var(--text-muted));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.25rem 0.6rem;
+      border-radius: 2rem;
+      background: rgba(6, 182, 212, 0.1);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      color: var(--accent-cyan);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      box-shadow: 0 0 10px rgba(6, 182, 212, 0.05);
+    }
+
+    /* Main Layout */
+    .container {
+      flex: 1;
+      display: flex;
+      height: calc(100vh - 65px);
+      max-width: 1800px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* Sidebar Settings */
+    .settings-panel {
+      width: 380px;
+      border-right: 1px solid var(--border-color);
+      background-color: var(--bg-panel);
+      backdrop-filter: blur(16px);
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      overflow-y: auto;
+    }
+
+    .settings-section-title {
+      font-family: var(--font-title);
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--accent-cyan);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    label {
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    label span.val {
+      color: var(--accent-cyan);
+      font-weight: 600;
+    }
+
+    input[type="text"], textarea, select {
+      background-color: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: 0.5rem;
+      padding: 0.75rem;
+      color: var(--text-main);
+      font-family: var(--font-body);
+      font-size: 0.9rem;
+      transition: all 0.2s ease;
+      width: 100%;
+    }
+
+    input[type="text"]:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    /* Range input styling */
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      background: rgba(51, 65, 85, 0.5);
+      border-radius: 3px;
+      outline: none;
+      margin: 10px 0;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      cursor: pointer;
+      box-shadow: 0 0 10px var(--accent-cyan);
+      transition: transform 0.1s ease;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+
+    /* Toggle Switch */
+    .toggle-container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 0.75rem;
+      padding: 0.85rem 1rem;
+      margin-bottom: 1rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .toggle-container:hover {
+      border-color: var(--border-glow);
+    }
+
+    .toggle-label-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .toggle-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .toggle-desc {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #334155;
+      transition: .4s;
+      border-radius: 24px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .4s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+
+    /* Chat & Result Area */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background-color: rgba(15, 23, 42, 0.2);
+    }
+
+    .playground-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 2rem;
+      overflow-y: auto;
+      gap: 1.5rem;
+      scroll-behavior: smooth;
+    }
+
+    /* Welcome view */
+    .welcome-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      margin: auto;
+      max-width: 600px;
+      padding: 2rem;
+      animation: fadeIn 0.5s ease;
+    }
+
+    .welcome-logo {
+      width: 4.5rem;
+      height: 4.5rem;
+      border-radius: 1.25rem;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 0 30px rgba(6, 182, 212, 0.3);
+    }
+
+    .welcome-logo svg {
+      width: 2.5rem;
+      height: 2.5rem;
+      fill: var(--text-main);
+    }
+
+    .welcome-title {
+      font-family: var(--font-title);
+      font-weight: 700;
+      font-size: 2.2rem;
+      margin-bottom: 0.75rem;
+      letter-spacing: -0.02em;
+    }
+
+    .welcome-desc {
+      font-size: 1rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+      margin-bottom: 2rem;
+    }
+
+    .suggestion-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      width: 100%;
+    }
+
+    .suggestion-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 0.75rem;
+      padding: 1rem;
+      text-align: left;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .suggestion-card:hover {
+      border-color: var(--accent-cyan);
+      background-color: rgba(30, 41, 69, 0.6);
+      transform: translateY(-2px);
+    }
+
+    .suggestion-card-title {
+      font-weight: 600;
+      font-size: 0.85rem;
+      color: var(--accent-cyan);
+      margin-bottom: 0.25rem;
+    }
+
+    .suggestion-card-text {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    /* Message Bubbles */
+    .message {
+      display: flex;
+      flex-direction: column;
+      max-width: 85%;
+      animation: slideUp 0.3s ease-out;
+    }
+
+    .message.user {
+      align-self: flex-end;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      width: 100%;
+      max-width: 100%;
+    }
+
+    .message-bubble {
+      padding: 1rem 1.25rem;
+      border-radius: 1rem;
+      line-height: 1.6;
+      font-size: 0.95rem;
+    }
+
+    .message.user .message-bubble {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      color: white;
+      border-bottom-right-radius: 0.25rem;
+      box-shadow: 0 4px 15px rgba(6, 182, 212, 0.2);
+    }
+
+    .message.assistant .message-bubble {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      border-bottom-left-radius: 0.25rem;
+    }
+
+    .message-sender {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.4rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .message.user .message-sender {
+      justify-content: flex-end;
+      color: var(--accent-cyan);
+    }
+
+    .message.assistant .message-sender {
+      color: var(--accent-purple);
+    }
+
+    /* Sources Panel inside Assistant Message */
+    .sources-container {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border-color);
+    }
+
+    .sources-title {
+      font-family: var(--font-title);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--accent-cyan);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .sources-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+
+    .source-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 0.75rem;
+      padding: 0.85rem;
+      font-size: 0.8rem;
+      transition: all 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .source-card:hover {
+      border-color: rgba(6, 182, 212, 0.4);
+      background-color: rgba(30, 41, 69, 0.5);
+    }
+
+    .source-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .source-pill-wrap {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+    }
+
+    .source-pill {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.15rem 0.4rem;
+      border-radius: 0.25rem;
+      background: rgba(139, 92, 246, 0.15);
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      color: #c084fc;
+      text-transform: uppercase;
+    }
+
+    .source-path {
+      font-family: monospace;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 180px;
+    }
+
+    .source-score {
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.15rem 0.4rem;
+      border-radius: 0.25rem;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--accent-green);
+    }
+
+    .source-text {
+      color: #cbd5e1;
+      line-height: 1.5;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+      font-style: italic;
+    }
+
+    /* Input Dock */
+    .input-dock {
+      padding: 1.5rem 2rem 2rem;
+      background-color: rgba(11, 15, 25, 0.9);
+      border-top: 1px solid var(--border-color);
+      backdrop-filter: blur(12px);
+    }
+
+    .input-form {
+      position: relative;
+      display: flex;
+      max-width: 1000px;
+      margin: 0 auto;
+      width: 100%;
+      background-color: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: 1rem;
+      padding: 0.5rem;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+    }
+
+    .input-form:focus-within {
+      border-color: var(--accent-cyan);
+      box-shadow: var(--shadow-glow);
+    }
+
+    .input-form textarea {
+      flex: 1;
+      background: transparent;
+      border: none;
+      resize: none;
+      padding: 0.75rem;
+      min-height: 2.75rem;
+      max-height: 150px;
+      color: var(--text-main);
+      font-size: 0.95rem;
+    }
+
+    .input-form textarea:focus {
+      outline: none;
+      box-shadow: none;
+    }
+
+    .send-btn {
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 0.75rem;
+      border: none;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      color: white;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      align-self: flex-end;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+    }
+
+    .send-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
+    }
+
+    .send-btn svg {
+      width: 1.25rem;
+      height: 1.25rem;
+      fill: white;
+      transition: transform 0.2s ease;
+    }
+
+    .send-btn:hover svg {
+      transform: translate(1px, -1px);
+    }
+
+    .send-btn:disabled {
+      background: #334155;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    /* Loading skeleton */
+    .loader-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      width: 100%;
+      padding: 1rem;
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-color);
+      border-radius: 1rem;
+      animation: pulse 1.5s infinite ease-in-out;
+    }
+
+    .loader-line {
+      height: 12px;
+      background-color: rgba(51, 65, 85, 0.5);
+      border-radius: 4px;
+      width: 100%;
+    }
+
+    .loader-line.short {
+      width: 60%;
+    }
+
+    .loader-line.mid {
+      width: 85%;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.2);
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.4);
+    }
+
+    /* Animations */
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.6; }
+      50% { opacity: 1; }
+    }
+
+    /* Utility */
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/>
+        </svg>
+      </div>
+      <h1 class="brand-name">kuberag</h1>
+      <span class="badge">Playground</span>
+    </div>
+    <div class="header-status">
+      <span style="color: var(--accent-green); font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; gap: 0.4rem;">
+        <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: var(--accent-green); box-shadow: 0 0 10px var(--accent-green);"></span>
+        Retriever Online
+      </span>
+    </div>
+  </header>
+
+  <!-- Container -->
+  <div class="container">
+    
+    <!-- Sidebar Settings -->
+    <aside class="settings-panel">
+      <div>
+        <h3 class="settings-section-title">
+          <svg style="width: 1rem; height: 1rem; fill: currentColor;" viewBox="0 0 24 24">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+          </svg>
+          Retrieval Settings
+        </h3>
+
+        <!-- Hybrid Search -->
+        <div class="toggle-container" onclick="toggleHybrid()">
+          <div class="toggle-label-wrap">
+            <span class="toggle-title">Hybrid Search</span>
+            <span class="toggle-desc">Combine vector & lexical search (RRF)</span>
+          </div>
+          <label class="switch" onclick="event.stopPropagation()">
+            <input type="checkbox" id="hybrid-search" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <!-- TopK Slider -->
+        <div class="form-group">
+          <label for="top-k">Limit (Top K) <span class="val" id="top-k-val">4</span></label>
+          <input type="range" id="top-k" min="1" max="20" value="4" oninput="document.getElementById('top-k-val').innerText = this.value">
+        </div>
+
+        <!-- Source Filter -->
+        <div class="form-group">
+          <label for="source-filter">Source Filter</label>
+          <input type="text" id="source-filter" placeholder="e.g. docs">
+        </div>
+
+        <!-- Doc Path Filter -->
+        <div class="form-group">
+          <label for="doc-path-filter">Document Path (Exact)</label>
+          <input type="text" id="doc-path-filter" placeholder="e.g. qdrant/landing_page/README.md">
+        </div>
+
+        <!-- Doc Path Prefix Filter -->
+        <div class="form-group">
+          <label for="doc-path-prefix">Document Path Prefix</label>
+          <input type="text" id="doc-path-prefix" placeholder="e.g. qdrant/landing_page/">
+        </div>
+      </div>
+
+      <div>
+        <h3 class="settings-section-title">
+          <svg style="width: 1rem; height: 1rem; fill: currentColor;" viewBox="0 0 24 24">
+            <path d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.22 19.58 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6zm-1-8h2v2h-2zm0 4h2v2h-2z"/>
+          </svg>
+          Generation Settings
+        </h3>
+
+        <!-- Temperature Slider -->
+        <div class="form-group">
+          <label for="temperature">Temperature <span class="val" id="temp-val">0.7</span></label>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" oninput="document.getElementById('temp-val').innerText = this.value">
+        </div>
+
+        <!-- Max Tokens -->
+        <div class="form-group">
+          <label for="max-tokens">Max Tokens <span class="val" id="tokens-val">512</span></label>
+          <input type="range" id="max-tokens" min="64" max="2048" step="64" value="512" oninput="document.getElementById('tokens-val').innerText = this.value">
+        </div>
+
+        <!-- System Prompt -->
+        <div class="form-group">
+          <label for="system-prompt">System Prompt Override</label>
+          <textarea id="system-prompt" placeholder="Default operator prompt will be used..."></textarea>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      
+      <!-- Playground Log -->
+      <div class="playground-area" id="playground-log">
+        
+        <!-- Welcome Screen -->
+        <div class="welcome-screen" id="welcome-screen">
+          <div class="welcome-logo">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/>
+            </svg>
+          </div>
+          <h2 class="welcome-title">kuberag Playground</h2>
+          <p class="welcome-desc">Tanımladığın KnowledgeBase kaynaklarında arama yapmak ve LLM ile cevap üretmek için hemen sorgu yazmaya başla. Ayarlar panelinden RAG parametrelerini anlık değiştirebilirsin.</p>
+          
+          <div class="suggestion-grid">
+            <div class="suggestion-card" onclick="selectSuggestion('What is the architecture of kuberag?')">
+              <h4 class="suggestion-card-title">Mimari Sorgusu</h4>
+              <p class="suggestion-card-text">"What is the architecture of kuberag?"</p>
+            </div>
+            <div class="suggestion-card" onclick="selectSuggestion('How does the auto-tuning loop work?')">
+              <h4 class="suggestion-card-title">Auto-tuning Çalışması</h4>
+              <p class="suggestion-card-text">"How does the auto-tuning loop work?"</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Input Dock -->
+      <div class="input-dock">
+        <form class="input-form" id="query-form" onsubmit="handleSend(event)">
+          <textarea id="query-input" placeholder="Ask a question..." onkeydown="handleKey(event)"></textarea>
+          <button type="submit" class="send-btn" id="send-button">
+            <svg viewBox="0 0 24 24">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+            </svg>
+          </button>
+        </form>
+      </div>
+
+    </main>
+
+  </div>
+
+  <script>
+    const hybridCheckbox = document.getElementById('hybrid-search');
+    const playgroundLog = document.getElementById('playground-log');
+    const welcomeScreen = document.getElementById('welcome-screen');
+    const queryInput = document.getElementById('query-input');
+    const sendButton = document.getElementById('send-button');
+
+    function toggleHybrid() {
+      hybridCheckbox.checked = !hybridCheckbox.checked;
+    }
+
+    function selectSuggestion(text) {
+      queryInput.value = text;
+      queryInput.focus();
+    }
+
+    function handleKey(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById('query-form').requestSubmit();
+      }
+    }
+
+    async function handleSend(e) {
+      e.preventDefault();
+      const query = queryInput.value.trim();
+      if (!query) return;
+
+      // Hide welcome screen
+      if (welcomeScreen) {
+        welcomeScreen.classList.add('hidden');
+      }
+
+      // Append user message
+      appendUserMessage(query);
+      queryInput.value = '';
+      
+      // Add loading state
+      const loaderId = appendLoader();
+      playgroundLog.scrollTop = playgroundLog.scrollHeight;
+      
+      // Disable send button
+      queryInput.disabled = true;
+      sendButton.disabled = true;
+
+      // Extract settings
+      const body = {
+        query: query,
+        topK: parseInt(document.getElementById('top-k').value),
+        hybrid: hybridCheckbox.checked,
+        temperature: parseFloat(document.getElementById('temperature').value),
+        maxTokens: parseInt(document.getElementById('max-tokens').value),
+      };
+
+      const source = document.getElementById('source-filter').value.trim();
+      if (source) body.source = source;
+
+      const docPath = document.getElementById('doc-path-filter').value.trim();
+      if (docPath) body.docPath = docPath;
+
+      const docPathPrefix = document.getElementById('doc-path-prefix').value.trim();
+      if (docPathPrefix) body.docPathPrefix = docPathPrefix;
+
+      const sysPrompt = document.getElementById('system-prompt').value.trim();
+      if (sysPrompt) body.systemPrompt = sysPrompt;
+
+      try {
+        const response = await fetch('/query', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        // Remove loader
+        document.getElementById(loaderId).remove();
+        
+        // Render assistant response
+        appendAssistantMessage(data);
+
+      } catch (err) {
+        console.error(err);
+        document.getElementById(loaderId).remove();
+        appendErrorMessage(err.message);
+      } finally {
+        queryInput.disabled = false;
+        sendButton.disabled = false;
+        queryInput.focus();
+        playgroundLog.scrollTop = playgroundLog.scrollHeight;
+      }
+    }
+
+    function appendUserMessage(text) {
+      const msgWrap = document.createElement('div');
+      msgWrap.className = 'message user';
+      msgWrap.innerHTML = `
+        <div class="message-sender">
+          👤 User
+        </div>
+        <div class="message-bubble">
+          ${escapeHtml(text)}
+        </div>
+      `;
+      playgroundLog.appendChild(msgWrap);
+    }
+
+    function appendLoader() {
+      const loaderId = 'loader-' + Date.now();
+      const loaderWrap = document.createElement('div');
+      loaderWrap.className = 'message assistant';
+      loaderWrap.id = loaderId;
+      loaderWrap.innerHTML = `
+        <div class="message-sender">
+          🤖 kuberag
+        </div>
+        <div class="loader-wrap">
+          <div class="loader-line"></div>
+          <div class="loader-line mid"></div>
+          <div class="loader-line short"></div>
+        </div>
+      `;
+      playgroundLog.appendChild(loaderWrap);
+      return loaderId;
+    }
+
+    function appendAssistantMessage(data) {
+      const msgWrap = document.createElement('div');
+      msgWrap.className = 'message assistant';
+      
+      let contentHtml = '';
+      if (data.answer) {
+        contentHtml = `<div class="message-bubble">${formatAnswer(data.answer)}</div>`;
+      } else {
+        contentHtml = `<div class="message-bubble" style="font-style: italic; color: var(--text-muted);">Retrieval completed. (No LLM generation is enabled on this Retriever service).</div>`;
+      }
+
+      // Add sources
+      let sourcesHtml = '';
+      if (data.results && data.results.length > 0) {
+        const cards = data.results.map(r => `
+          <div class="source-card">
+            <div class="source-card-header">
+              <div class="source-pill-wrap">
+                <span class="source-pill">${escapeHtml(r.source)}</span>
+                <span class="source-path" title="${escapeHtml(r.docPath)}">${escapeHtml(r.docPath)}</span>
+              </div>
+              <span class="source-score">${r.score}</span>
+            </div>
+            <div class="source-text">"${escapeHtml(r.text)}"</div>
+          </div>
+        `).join('');
+
+        sourcesHtml = `
+          <div class="sources-container">
+            <div class="sources-title">
+              <svg style="width: 1rem; height: 1rem; fill: currentColor;" viewBox="0 0 24 24">
+                <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+              </svg>
+              Matched Sources (${data.results.length})
+            </div>
+            <div class="sources-grid">
+              ${cards}
+            </div>
+          </div>
+        `;
+      } else {
+        sourcesHtml = `
+          <div class="sources-container" style="color: var(--text-muted); font-size: 0.85rem; font-style: italic;">
+            No matching documents found in vector store.
+          </div>
+        `;
+      }
+
+      msgWrap.innerHTML = `
+        <div class="message-sender">
+          🤖 kuberag
+        </div>
+        ${contentHtml}
+        ${sourcesHtml}
+      `;
+      playgroundLog.appendChild(msgWrap);
+    }
+
+    function appendErrorMessage(errorMsg) {
+      const msgWrap = document.createElement('div');
+      msgWrap.className = 'message assistant';
+      msgWrap.innerHTML = `
+        <div class="message-sender" style="color: #ef4444;">
+          ⚠️ Error
+        </div>
+        <div class="message-bubble" style="background-color: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #fca5a5;">
+          Sorgu işlenirken bir hata oluştu: ${escapeHtml(errorMsg)}
+        </div>
+      `;
+      playgroundLog.appendChild(msgWrap);
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+      };
+      return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+    }
+
+    function formatAnswer(text) {
+      // Basic markdown replacement
+      let formatted = escapeHtml(text);
+      // Replace code blocks
+      formatted = formatted.replace(/```([\s\S]+?)```/g, '<pre style="background: rgba(15,23,42,0.8); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border-color); font-family: monospace; overflow-x: auto; margin: 0.75rem 0; font-size: 0.85rem; color: #38bdf8;"><code>$1</code></pre>');
+      // Replace inline code
+      formatted = formatted.replace(/`([^`]+)`/g, '<code style="background: rgba(15,23,42,0.6); padding: 0.15rem 0.35rem; border-radius: 0.25rem; font-family: monospace; color: #38bdf8; font-size: 0.85rem;">$1</code>');
+      // Replace bold
+      formatted = formatted.replace(/\*\*([^*]+)\*\*/g, '<strong style="font-weight: 600; color: var(--accent-cyan);">$1</strong>');
+      // Replace newlines
+      formatted = formatted.replaceAll('\n', '<br>');
+      return formatted;
+    }
+  </script>
+</body>
+</html>
