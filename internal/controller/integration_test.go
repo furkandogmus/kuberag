@@ -282,6 +282,101 @@ func TestRetrieverCreatesServingWorkload(t *testing.T) {
 	})
 }
 
+// TestKnowledgeBaseAutoTuneLoop drives the full eval -> tune -> re-index ->
+// re-eval -> exhaustion loop against the real apiserver. It also guards the
+// re-index Job-name collision: envtest has no Job TTL controller, so if the
+// re-index reused the completed initial-ingest Job name the loop would stall
+// here (its result ConfigMap is already gone), failing the test.
+func TestKnowledgeBaseAutoTuneLoop(t *testing.T) {
+	ns := newNamespace(t)
+	on := true
+	kb := sampleKB(ns, "autotune")
+	kb.Spec.RetrievalQuality = &ragv1alpha1.RetrievalQualitySpec{
+		Enabled:              &on,
+		DatasetRef:           ragv1alpha1.LocalObjectRef{Name: "eval-ds"},
+		MinimumRecallPercent: 90,
+		AutoTune:             &ragv1alpha1.AutoTuneSpec{Enabled: &on, MaxAttempts: 1},
+	}
+	if err := k8sClient.Create(testCtx, kb); err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	// waitActiveJob blocks until status.activeJob points at a Job of the given
+	// type and returns its name.
+	waitActiveJob := func(jobType string) string {
+		var name string
+		eventually(t, 20*time.Second, func() error {
+			var got ragv1alpha1.KnowledgeBase
+			if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+				return err
+			}
+			if got.Status.ActiveJob == "" {
+				return fmt.Errorf("no active job yet (phase=%s)", got.Status.Phase)
+			}
+			var job batchv1.Job
+			if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: got.Status.ActiveJob}, &job); err != nil {
+				return err
+			}
+			if job.Labels[labelJobType] != jobType {
+				return fmt.Errorf("active job type=%s, want %s", job.Labels[labelJobType], jobType)
+			}
+			name = got.Status.ActiveJob
+			return nil
+		})
+		return name
+	}
+
+	// 1. Initial ingestion.
+	ingest0 := waitActiveJob(jobTypeIngest)
+	completeJob(t, ns, ingest0, `{"totalChunks":10,"sources":[{"name":"docs","revision":"r0","chunks":10}]}`)
+
+	// 2. First evaluation comes back below the 90% target.
+	eval1 := waitActiveJob(jobTypeEval)
+	completeJob(t, ns, eval1, `{"recallPercent":50,"queries":4}`)
+
+	// 3. Auto-tune fires: one attempt recorded and chunking actually tuned
+	//    (default overlap 80 grows).
+	eventually(t, 20*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.AutoTuneAttempts != 1 {
+			return fmt.Errorf("attempts=%d, want 1", got.Status.AutoTuneAttempts)
+		}
+		if got.Status.EffectiveChunking == nil || got.Status.EffectiveChunking.Overlap <= 80 {
+			return fmt.Errorf("effective chunking not tuned: %+v", got.Status.EffectiveChunking)
+		}
+		return nil
+	})
+
+	// 4. A fresh re-index Job is created (distinct from the completed initial one).
+	reindex := waitActiveJob(jobTypeIngest)
+	if reindex == ingest0 {
+		t.Fatalf("re-index reused stale ingest Job name %q — auto-tune would stall", ingest0)
+	}
+	completeJob(t, ns, reindex, `{"totalChunks":12,"sources":[{"name":"docs","revision":"r1","chunks":12}]}`)
+
+	// 5. Re-evaluation still below target; a new eval round runs.
+	eval2 := waitActiveJob(jobTypeEval)
+	if eval2 == eval1 {
+		t.Fatalf("eval round did not advance (%q reused)", eval1)
+	}
+	completeJob(t, ns, eval2, `{"recallPercent":55,"queries":4}`)
+
+	// 6. Attempts exhausted (maxAttempts=1) -> Degraded.
+	eventually(t, 20*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.Phase != ragv1alpha1.PhaseDegraded {
+			return fmt.Errorf("phase=%s, want Degraded", got.Status.Phase)
+		}
+		return nil
+	})
+}
+
 func TestCRDValidations(t *testing.T) {
 	ns := newNamespace(t)
 

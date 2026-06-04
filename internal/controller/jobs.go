@@ -227,7 +227,12 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1
 	if err != nil {
 		return nil, err
 	}
-	name := truncName(fmt.Sprintf("%s-ingest-%s", kb.Name, hash))
+	// The spec hash is stable across auto-tune (which tunes *effective* chunking
+	// and forces re-ingest by clearing ObservedSpecHash, not by changing the
+	// hash). Disambiguate by the auto-tune attempt so an immediate re-index gets
+	// its own Job instead of colliding with the previous, still-present completed
+	// Job (whose result ConfigMap is already gone) before its TTL expires.
+	name := truncName(fmt.Sprintf("%s-ingest-%s-t%d", kb.Name, hash, kb.Status.AutoTuneAttempts))
 	env := []corev1.EnvVar{
 		{Name: "KB_SPEC_JSON", Value: specJSON},
 		{Name: "INGEST_MODE", Value: string(mode)},
