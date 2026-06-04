@@ -27,6 +27,9 @@ The desired knowledge state.
 | `ingestion.mode` | enum `full`/`incremental` | `incremental` | Re-process everything vs skip unchanged sources. |
 | `ingestion.resources.cpu` / `.memory` | string | `250m` / `4Gi` limit | Worker pod resources. |
 | `ingestion.serviceAccountName` | string | `kuberag-worker` | SA for ingestion Jobs (e.g. for IRSA). |
+| `ingestion.nodeSelector` | map | — | Schedule worker Jobs onto matching nodes. |
+| `ingestion.tolerations[]` | core/v1 Toleration | — | Let worker Jobs tolerate tainted nodes. |
+| `ingestion.affinity` | core/v1 Affinity | — | Worker Job affinity / anti-affinity rules. |
 | `freshness.schedule` | cron (5-field) | — | Periodic re-sync; empty disables. |
 | `retrievalQuality` | object | — | Eval + auto-tune. See [below](#retrievalquality). |
 | `workerImage` | string | built-in | Override the worker image. |
@@ -74,6 +77,10 @@ A serving endpoint over a KnowledgeBase.
 | `rerank.model` | string | `bge-reranker-base` | Reranker model. |
 | `replicas` | int | `1` | Server replicas (scale subresource enabled). |
 | `image` | string | built-in | Override the retriever image. |
+| `resources` | core/v1 ResourceRequirements | — | Retriever pod resources. |
+| `nodeSelector` | map | — | Schedule retriever pods onto matching nodes. |
+| `tolerations[]` | core/v1 Toleration | — | Let retriever pods tolerate tainted nodes. |
+| `affinity` | core/v1 Affinity | — | Retriever pod affinity / anti-affinity rules. |
 | `generation` | object | — | Optional LLM answer synthesis. See [below](#generation). |
 
 #### generation
@@ -89,7 +96,23 @@ A serving endpoint over a KnowledgeBase.
 | `systemPrompt` | string | built-in | Override the grounding instruction. |
 
 `status`: `phase`, `serviceEndpoint`, `readyReplicas`, `conditions[]` (`Available`).
-`/query` returns `{query, results[]{text,source,docPath,score}, answer?}`.
+
+`/query` accepts:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `query` | string | — | Required user question. |
+| `topK` | int 1–100 | Retriever `topK` | Number of chunks returned. |
+| `source` | string | — | Restrict retrieval to one source name. |
+| `docPath` | string | — | Restrict retrieval to one exact document path. |
+| `docPathPrefix` | string | — | Restrict retrieval to paths with this prefix. |
+| `hybrid` | bool | `false` | Combine vector and text search with reciprocal rank fusion. |
+| `history[]` | `{role,content}` | — | Prior `user`/`assistant` turns included in generation. |
+| `temperature` | float 0–2 | provider default | Per-request generation temperature. |
+| `maxTokens` | int 1–8192 | generation `maxTokens` | Per-request answer length cap. |
+| `systemPrompt` | string | generation prompt | Per-request grounding prompt override. |
+
+It returns `{query, results[]{text,source,docPath,score}, answer?}`.
 
 ## VectorIndex (`vi`)
 

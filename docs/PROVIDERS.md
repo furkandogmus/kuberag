@@ -15,7 +15,7 @@ matches nested *and* top-level). Empty globs fall back to known text extensions.
 
 | Type | `endpoint` | Health probe | Notes |
 |------|-----------|--------------|-------|
-| `qdrant` | `http://host:6333` | ✅ HTTP (points, dim) | Payload index on `source` for fast per-source delete. |
+| `qdrant` | `http://host:6333` | ✅ HTTP (points, dim) | Payload indexes on `source`, `doc_path`, and `text` for deletes, metadata filters, and hybrid text search. |
 | `pgvector` | `postgresql://…` DSN | ⚠️ `Unknown` | Auto-creates table + `vector` extension; `<=>`/`<#>`/`<->` per metric. |
 | `milvus` | `http://host:19530` | ⚠️ `Unknown` | Eventually-consistent counts; string PK. |
 
