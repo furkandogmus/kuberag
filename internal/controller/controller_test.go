@@ -41,31 +41,38 @@ func TestEffectiveChunkingDefaults(t *testing.T) {
 
 func TestSpecHashStableAndSensitive(t *testing.T) {
 	kb := baseKB()
-	eff := effectiveChunking(kb)
-	h1 := specHash(kb, eff)
-	if h1 != specHash(kb, eff) {
+	h1 := specHash(kb)
+	if h1 != specHash(kb) {
 		t.Fatal("specHash not deterministic")
 	}
 
 	// Changing the embedding model must change the hash.
 	kb.Spec.Embedding.Model = "bge-large"
-	if specHash(kb, effectiveChunking(kb)) == h1 {
+	if specHash(kb) == h1 {
 		t.Fatal("specHash should change when model changes")
 	}
 
-	// Changing chunking must change the hash.
+	// Changing spec chunking must change the hash.
 	kb2 := baseKB()
-	eff2 := effectiveChunking(kb2)
-	eff2.MaxTokens = 500
-	if specHash(kb2, eff2) == h1 {
+	kb2.Spec.Chunking.MaxTokens = 500
+	if specHash(kb2) == h1 {
 		t.Fatal("specHash should change when chunking changes")
+	}
+
+	// An auto-tuned override (status) must NOT change the hash — auto-tune
+	// forces re-ingest by clearing ObservedSpecHash, not via the hash.
+	kb3 := baseKB()
+	tuned := specChunking(kb3)
+	tuned.Overlap += 40
+	kb3.Status.EffectiveChunking = &tuned
+	if specHash(kb3) != h1 {
+		t.Fatal("specHash must ignore the auto-tune override")
 	}
 }
 
 func TestNeedsIngest(t *testing.T) {
 	kb := baseKB()
-	eff := effectiveChunking(kb)
-	hash := specHash(kb, eff)
+	hash := specHash(kb)
 
 	if _, need := needsIngest(kb, hash); !need {
 		t.Fatal("fresh KB with no observed hash should need ingest")
@@ -80,7 +87,7 @@ func TestNeedsIngest(t *testing.T) {
 
 	// Model drift.
 	kb.Spec.Embedding.Model = "bge-large"
-	newHash := specHash(kb, effectiveChunking(kb))
+	newHash := specHash(kb)
 	if _, need := needsIngest(kb, newHash); !need {
 		t.Fatal("model change should trigger ingest")
 	}
@@ -89,8 +96,7 @@ func TestNeedsIngest(t *testing.T) {
 func TestNeedsIngestFreshness(t *testing.T) {
 	kb := baseKB()
 	kb.Spec.Freshness.Schedule = "*/5 * * * *" // every 5 minutes
-	eff := effectiveChunking(kb)
-	hash := specHash(kb, eff)
+	hash := specHash(kb)
 	kb.Status.ObservedSpecHash = hash
 	kb.Status.ObservedEmbeddingModel = "bge-small"
 

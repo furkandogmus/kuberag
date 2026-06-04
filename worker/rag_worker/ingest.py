@@ -65,7 +65,12 @@ def run() -> None:
             source_results.append({"name": name, "revision": sd.revision, "chunks": count})
             log(f"source '{name}': indexed {count} chunks")
 
+    # store.count() is authoritative, but some stores (Milvus) are eventually
+    # consistent right after an upsert; fall back to what we just wrote.
     total = store.count()
+    upserted = sum(s.get("chunks", 0) for s in source_results)
+    if total < upserted:
+        total = upserted
     write_result({"totalChunks": total, "sources": source_results})
     log(f"done: {total} chunks in store")
 

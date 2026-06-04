@@ -247,8 +247,22 @@ class MilvusStore(VectorStore):
         self.client.upsert(self.collection, rows)
 
     def count(self) -> int:
-        self.client.flush(self.collection)
-        return self.client.query(self.collection, filter="", output_fields=["count(*)"])[0]["count(*)"]
+        # MilvusClient has no flush(); load then count(*). Counts are eventually
+        # consistent right after an upsert, so retry briefly for a stable value.
+        import time
+
+        try:
+            self.client.load_collection(self.collection)
+        except Exception:
+            pass
+        n = 0
+        for _ in range(10):
+            res = self.client.query(self.collection, filter="", output_fields=["count(*)"])
+            n = int(res[0]["count(*)"]) if res else 0
+            if n > 0:
+                break
+            time.sleep(1)
+        return n
 
     def search(self, vector: list[float], topk: int) -> list[dict]:
         res = self.client.search(

@@ -84,8 +84,15 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	hash := specHash(&kb)
+	// If the user edited the spec while an auto-tuned chunking override is active,
+	// drop the override so the new ingestion honours the spec (otherwise the
+	// stored EffectiveChunking would mask the spec change).
+	if kb.Status.ObservedSpecHash != "" && kb.Status.ObservedSpecHash != hash && kb.Status.EffectiveChunking != nil {
+		kb.Status.EffectiveChunking = nil
+		kb.Status.AutoTuneAttempts = 0
+	}
 	eff := effectiveChunking(&kb)
-	hash := specHash(&kb, eff)
 
 	// Finalize any in-flight job before deciding new work.
 	if kb.Status.ActiveJob != "" {
@@ -390,10 +397,8 @@ func (r *KnowledgeBaseReconciler) event(obj runtime.Object, etype, reason, msg s
 
 // effectiveChunking returns the chunking actually in use: the auto-tuned values
 // from status if present, otherwise the spec with defaults filled.
-func effectiveChunking(kb *ragv1alpha1.KnowledgeBase) ragv1alpha1.ChunkingSpec {
-	if kb.Status.EffectiveChunking != nil {
-		return *kb.Status.EffectiveChunking
-	}
+// specChunking is the user's requested chunking with defaults filled in.
+func specChunking(kb *ragv1alpha1.KnowledgeBase) ragv1alpha1.ChunkingSpec {
 	c := kb.Spec.Chunking
 	if c.Strategy == "" {
 		c.Strategy = ragv1alpha1.ChunkSemantic
@@ -407,8 +412,19 @@ func effectiveChunking(kb *ragv1alpha1.KnowledgeBase) ragv1alpha1.ChunkingSpec {
 	return c
 }
 
-// specHash fingerprints the spec fields that require re-ingestion when changed.
-func specHash(kb *ragv1alpha1.KnowledgeBase, eff ragv1alpha1.ChunkingSpec) string {
+// effectiveChunking is the chunking actually used: an auto-tuned override from
+// status if present, otherwise the user's spec.
+func effectiveChunking(kb *ragv1alpha1.KnowledgeBase) ragv1alpha1.ChunkingSpec {
+	if kb.Status.EffectiveChunking != nil {
+		return *kb.Status.EffectiveChunking
+	}
+	return specChunking(kb)
+}
+
+// specHash fingerprints the user's intent (spec) so edits trigger re-ingestion.
+// It deliberately hashes spec chunking, not the effective (possibly auto-tuned)
+// chunking — auto-tune forces its own re-ingest by clearing ObservedSpecHash.
+func specHash(kb *ragv1alpha1.KnowledgeBase) string {
 	material := struct {
 		Sources  []ragv1alpha1.Source
 		Chunking ragv1alpha1.ChunkingSpec
@@ -416,7 +432,7 @@ func specHash(kb *ragv1alpha1.KnowledgeBase, eff ragv1alpha1.ChunkingSpec) strin
 		Store    string
 	}{
 		Sources:  kb.Spec.Sources,
-		Chunking: eff,
+		Chunking: specChunking(kb),
 		Model:    kb.Spec.Embedding.Model,
 		Store:    string(kb.Spec.VectorStore.Type) + "|" + kb.Spec.VectorStore.Endpoint,
 	}
