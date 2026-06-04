@@ -10,12 +10,15 @@ Config comes entirely from env (set by the operator):
 from __future__ import annotations
 
 import os
+import time
 
 from contextlib import asynccontextmanager
 from typing import Literal
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+
+from rag_worker.chunking import chunk_text
 
 from rag_worker.embeddings import from_spec
 from rag_worker.stores import make_store
@@ -180,6 +183,12 @@ class QueryRequest(BaseModel):
     docPath: str | None = Field(default=None, min_length=1)
     docPathPrefix: str | None = Field(default=None, min_length=1)
     hybrid: bool | None = None
+    # Per-request retrieval-tuning overrides (fall back to the Retriever's spec
+    # defaults when omitted). They let the playground experiment live without a
+    # redeploy.
+    hybridDensePercent: int | None = Field(default=None, ge=0, le=100)
+    scoreThresholdPercent: int | None = Field(default=None, ge=0, le=100)
+    rerank: bool | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     systemPrompt: str | None = Field(default=None, min_length=1)
     maxTokens: int | None = Field(default=None, ge=1, le=8192)
@@ -192,10 +201,24 @@ class Chunk(BaseModel):
     score: float
 
 
+class QueryMeta(BaseModel):
+    """Diagnostics describing how a query was retrieved — surfaced so callers (the
+    playground) can see the effect of the tuning knobs they set."""
+    topK: int
+    hybrid: bool
+    hybridDensePercent: int | None = None
+    scoreThresholdPercent: int
+    reranked: bool
+    candidates: int
+    returned: int
+    tookMillis: int
+
+
 class QueryResponse(BaseModel):
     query: str
     results: list[Chunk]
     answer: str | None = None
+    meta: QueryMeta | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -213,10 +236,17 @@ def healthz() -> dict:
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest) -> QueryResponse:
     _ensure()
+    t0 = time.perf_counter()
     topk = req.topK or _DEFAULT_TOPK
     use_hybrid = req.hybrid if req.hybrid is not None else _HYBRID_DEFAULT
+    # Per-request overrides fall back to the server (spec) defaults.
+    dense_w = req.hybridDensePercent / 100.0 if req.hybridDensePercent is not None else _HYBRID_DENSE_W
+    threshold = req.scoreThresholdPercent / 100.0 if req.scoreThresholdPercent is not None else _SCORE_THRESHOLD
+    # Reranking can only be turned *off* per request (the model is loaded at
+    # startup); a request can't enable it on a Retriever that didn't opt in.
+    use_rerank = _RERANK and (req.rerank if req.rerank is not None else True)
 
-    if _RERANK:
+    if use_rerank:
         # Give the reranker a deeper candidate pool, then return the top `topk`.
         fetch_k = _RERANK_CANDIDATES if _RERANK_CANDIDATES > 0 else max(topk * 4, 20)
     elif use_hybrid:
@@ -235,7 +265,7 @@ def query(req: QueryRequest) -> QueryResponse:
         )
         hits = rrf(
             vector_hits, text_hits,
-            dense_weight=_HYBRID_DENSE_W, text_weight=1.0 - _HYBRID_DENSE_W,
+            dense_weight=dense_w, text_weight=1.0 - dense_w,
         )
     else:
         qv = _embedder.embed_query(req.query)
@@ -243,7 +273,8 @@ def query(req: QueryRequest) -> QueryResponse:
             qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
         )
 
-    if _RERANK and hits:
+    reranked = bool(use_rerank and hits)
+    if reranked:
         scores = list(_reranker.rerank(req.query, [h["payload"].get("text", "") for h in hits]))
         for h, s in zip(hits, scores):
             h["score"] = float(s)
@@ -251,8 +282,10 @@ def query(req: QueryRequest) -> QueryResponse:
 
     results = []
     for h in hits[:topk]:
-        is_rrf_score = use_hybrid and not _RERANK
-        if not is_rrf_score and h["score"] < _SCORE_THRESHOLD:
+        # RRF fusion scores are rank-derived, not similarities, so the similarity
+        # threshold only applies to raw vector/rerank scores.
+        is_rrf_score = use_hybrid and not use_rerank
+        if not is_rrf_score and h["score"] < threshold:
             continue
         p = h["payload"]
         results.append(Chunk(
@@ -261,6 +294,17 @@ def query(req: QueryRequest) -> QueryResponse:
             docPath=p.get("doc_path", ""),
             score=round(float(h["score"]), 4),
         ))
+
+    meta = QueryMeta(
+        topK=topk,
+        hybrid=use_hybrid,
+        hybridDensePercent=round(dense_w * 100) if use_hybrid else None,
+        scoreThresholdPercent=round(threshold * 100),
+        reranked=reranked,
+        candidates=fetch_k,
+        returned=len(results),
+        tookMillis=round((time.perf_counter() - t0) * 1000),
+    )
 
     answer = None
     if _GEN_ENABLED and results:
@@ -277,4 +321,92 @@ def query(req: QueryRequest) -> QueryResponse:
             # Generation is best-effort: never fail retrieval because the LLM
             # call errored (quota, timeout, bad model). Surface the reason.
             answer = f"[generation unavailable: {type(e).__name__}: {e}]"
-    return QueryResponse(query=req.query, results=results, answer=answer)
+    return QueryResponse(query=req.query, results=results, answer=answer, meta=meta)
+
+
+# Ingest endpoints (Dev/Playground mode)
+class UrlIngestRequest(BaseModel):
+    url: str = Field(min_length=1)
+    source: str = Field(default="playground", min_length=1)
+    strategy: str = Field(default="semantic", min_length=1)
+    maxTokens: int = Field(default=800, ge=1)
+    overlap: int = Field(default=80, ge=0)
+
+
+@app.post("/ingest/file")
+def ingest_file(
+    file: UploadFile = File(...),
+    source: str = Form("playground"),
+    strategy: str = Form("semantic"),
+    maxTokens: int = Form(800),
+    overlap: int = Form(80),
+) -> dict:
+    _ensure()
+    content = file.file.read()
+    filename = file.filename
+    if filename.lower().endswith(".pdf"):
+        from rag_worker.sources import _read_pdf_bytes
+        text = _read_pdf_bytes(content)
+    else:
+        text = content.decode("utf-8", errors="ignore")
+
+    chunks = chunk_text(text, maxTokens, overlap, strategy)
+    if not chunks:
+        return {"status": "ok", "message": "No text extracted from file", "chunks": 0}
+
+    points = []
+    import hashlib
+    import uuid
+    for i, chunk in enumerate(chunks):
+        vector = _embedder.embed_query(chunk)
+        chunk_hash = hashlib.sha256(chunk.encode()).hexdigest()[:16]
+        points.append({
+            "id": str(uuid.uuid4()),
+            "vector": vector,
+            "payload": {
+                "source": source,
+                "doc_path": filename,
+                "text": chunk,
+                "chunk_hash": chunk_hash
+            }
+        })
+    _store.upsert(points)
+    return {"status": "ok", "message": f"Successfully ingested {len(points)} chunks from file {filename}", "chunks": len(points), "filename": filename}
+
+
+@app.post("/ingest/url")
+def ingest_url(req: UrlIngestRequest) -> dict:
+    _ensure()
+    import requests
+    from rag_worker.sources import _strip_html
+    import hashlib
+    import uuid
+
+    try:
+        resp = requests.get(req.url, timeout=15, headers={"User-Agent": "kuberag-playground/1.0"})
+        resp.raise_for_status()
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to fetch URL: {e}"}
+
+    text = _strip_html(resp.text)
+    chunks = chunk_text(text, req.maxTokens, req.overlap, req.strategy)
+    if not chunks:
+        return {"status": "ok", "message": "No text extracted from URL", "chunks": 0}
+
+    points = []
+    for i, chunk in enumerate(chunks):
+        vector = _embedder.embed_query(chunk)
+        chunk_hash = hashlib.sha256(chunk.encode()).hexdigest()[:16]
+        points.append({
+            "id": str(uuid.uuid4()),
+            "vector": vector,
+            "payload": {
+                "source": req.source,
+                "doc_path": req.url,
+                "text": chunk,
+                "chunk_hash": chunk_hash
+            }
+        })
+    _store.upsert(points)
+    return {"status": "ok", "message": f"Successfully ingested {len(points)} chunks from URL {req.url}", "chunks": len(points), "url": req.url}
+

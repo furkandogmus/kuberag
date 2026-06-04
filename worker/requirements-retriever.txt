@@ -9,3 +9,6 @@ httpx==0.27.2
 fastapi==0.112.2
 uvicorn==0.30.6
 pydantic==2.13.4
+python-multipart==0.0.9  # /ingest/file Form uploads (playground dev mode)
+requests==2.32.3         # /ingest/url web fetch (playground dev mode)
+pypdf==4.2.0             # PDF extraction for /ingest/file

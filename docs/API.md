@@ -64,7 +64,8 @@ The desired knowledge state.
 `observedSpecHash`, `observedEmbeddingModel`, `effectiveChunking` (auto-tune
 override), `autoTuneAttempts`, `bestChunking` / `bestRecallPercent` (best config
 auto-tune observed; the KB is reverted here if the target is never met),
-`evalRound`, `lastIndexedTime`, `indexedChunks`,
+`pendingRetune` (an auto-tune re-index is owed), `evalRound`, `lastIndexedTime`,
+`indexedChunks`,
 `sources[]` (per-source revision + chunk count), `evaluation`
 (`recallPercent`, `p95LatencyMillis`, `queries`, `time`), `activeJob`,
 `conditions[]` (`Ready`, `Ingesting`, `Evaluated`).
@@ -114,13 +115,18 @@ A serving endpoint over a KnowledgeBase.
 | `source` | string | — | Restrict retrieval to one source name. |
 | `docPath` | string | — | Restrict retrieval to one exact document path. |
 | `docPathPrefix` | string | — | Restrict retrieval to paths with this prefix. |
-| `hybrid` | bool | `false` | Combine vector and text search with reciprocal rank fusion. |
+| `hybrid` | bool | Retriever `hybrid` | Combine vector and text search with reciprocal rank fusion. |
+| `hybridDensePercent` | int 0–100 | Retriever `hybridDensePercent` | Dense (vector) weight in RRF fusion; lexical gets the rest. Only applies when hybrid is on. |
+| `scoreThresholdPercent` | int 0–100 | Retriever `scoreThresholdPercent` | Drop matches below this similarity (raw vector / rerank scores only; not RRF). |
+| `rerank` | bool | `true` if Retriever reranks | Per-request opt-out of reranking. Can only disable it — a request can't enable reranking on a Retriever that didn't load a reranker. |
 | `history[]` | `{role,content}` | — | Prior `user`/`assistant` turns included in generation. |
 | `temperature` | float 0–2 | provider default | Per-request generation temperature. |
 | `maxTokens` | int 1–8192 | generation `maxTokens` | Per-request answer length cap. |
 | `systemPrompt` | string | generation prompt | Per-request grounding prompt override. |
 
-It returns `{query, results[]{text,source,docPath,score}, answer?}`.
+It returns `{query, results[]{text,source,docPath,score}, answer?, meta}`, where
+`meta` reports how retrieval ran: `{topK, hybrid, hybridDensePercent,
+scoreThresholdPercent, reranked, candidates, returned, tookMillis}`.
 
 ## VectorIndex (`vi`)
 

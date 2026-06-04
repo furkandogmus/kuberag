@@ -275,6 +275,80 @@ class TestRetrieverServer(unittest.TestCase):
         finally:
             server._HYBRID_DENSE_W = original
 
+    def test_request_overrides_dense_percent(self):
+        # Per-request hybridDensePercent must steer RRF without any server env change.
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.9, "payload": {"source": "s1", "doc_path": "docB", "text": "vec"}},
+        ]
+        self.mock_store.search_text.return_value = [
+            {"score": 1.0, "payload": {"source": "s1", "doc_path": "docC", "text": "lex"}},
+        ]
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+
+        resp = self.client.post("/query", json={"query": "q", "hybrid": True, "topK": 2, "hybridDensePercent": 90})
+        self.assertEqual(resp.json()["results"][0]["docPath"], "docB")
+        self.assertEqual(resp.json()["meta"]["hybridDensePercent"], 90)
+
+        resp = self.client.post("/query", json={"query": "q", "hybrid": True, "topK": 2, "hybridDensePercent": 10})
+        self.assertEqual(resp.json()["results"][0]["docPath"], "docC")
+
+    def test_request_score_threshold_filters(self):
+        # A high per-request threshold drops weak (sub-threshold) vector matches.
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.5, "payload": {"source": "s1", "doc_path": "weak", "text": "meh"}},
+        ]
+        resp = self.client.post("/query", json={"query": "q", "scoreThresholdPercent": 80})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data["results"]), 0)
+        self.assertEqual(data["meta"]["scoreThresholdPercent"], 80)
+        self.assertEqual(data["meta"]["returned"], 0)
+
+    def test_request_can_disable_rerank(self):
+        # A Retriever with reranking on still lets a request opt out per query.
+        server._RERANK = True
+        server._reranker = MagicMock()
+        server._reranker.rerank.return_value = [0.5]
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.9, "payload": {"source": "s1", "doc_path": "docA", "text": "hello"}},
+        ]
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+        try:
+            resp = self.client.post("/query", json={"query": "hello", "topK": 5, "rerank": False})
+            self.assertEqual(resp.status_code, 200)
+            self.mock_store.search.assert_called_once_with(
+                [0.1, 0.2, 0.3], 5, source=None, doc_path=None, doc_path_prefix=None
+            )
+            self.mock_store.search_text.assert_not_called()
+            server._reranker.rerank.assert_not_called()
+            self.assertFalse(resp.json()["meta"]["reranked"])
+        finally:
+            server._RERANK = False
+            server._reranker = None
+
+    def test_response_includes_meta(self):
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.9, "payload": {"source": "s1", "doc_path": "docA", "text": "hello"}},
+        ]
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+
+        resp = self.client.post("/query", json={"query": "hello", "topK": 3})
+        meta = resp.json()["meta"]
+        self.assertEqual(meta["topK"], 3)
+        self.assertFalse(meta["hybrid"])
+        self.assertEqual(meta["returned"], 1)
+        self.assertIn("tookMillis", meta)
+
     def test_query_with_generation_overrides(self):
         self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
         self.mock_store.search.return_value = [

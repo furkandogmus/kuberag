@@ -175,6 +175,10 @@ The dataset is a ConfigMap with key `dataset.jsonl`, one JSON object per line:
 Recall is **recall@TopK**: the fraction of queries whose `expectedSources`
 appear in the top-`topK` retrieved chunks.
 
+> If the dataset is empty or missing (zero queries), the evaluation reports a
+> `NoDataset` condition and is **ignored** by the recall gate — the KB is not
+> marked `Degraded` and auto-tune does not fire on a meaningless `0%`.
+
 ### How auto-tune actually adjusts chunking
 
 When measured recall < `minimumRecallPercent` and `autoTune.enabled` is true, on
@@ -232,8 +236,13 @@ field (e.g. default on, but force `hybrid: false` for a latency-sensitive call).
 over them, and returns the best `topK`. Widen the pool when the right chunk is
 being retrieved but ranked just outside `topK`.
 
-Per-request, `/query` also accepts `hybrid`, `source` / `docPath` /
-`docPathPrefix` filters, and `history[]`.
+Per-request, `/query` also accepts `hybrid`, `hybridDensePercent`,
+`scoreThresholdPercent`, `rerank` (opt-out only), `source` / `docPath` /
+`docPathPrefix` filters, and `history[]`. Each falls back to the Retriever's spec
+default when omitted, so you can A/B these knobs live (the built-in playground at
+`/` exposes them as sliders and shows the resulting retrieval stats per query).
+The response carries a `meta` block describing how retrieval ran (effective
+topK/hybrid/dense%/threshold, candidate pool, reranked, latency).
 
 ```yaml
 apiVersion: rag.furkan.dev/v1alpha1

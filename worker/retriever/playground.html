@@ -120,7 +120,7 @@
       padding: 1.5rem;
       display: flex;
       flex-direction: column;
-      gap: 1.5rem;
+      gap: 2rem;
       overflow-y: auto;
     }
 
@@ -284,6 +284,94 @@
 
     input:checked + .slider:before {
       transform: translateX(20px);
+    }
+
+    /* Tabs & Buttons */
+    .tab-btn {
+      background: transparent;
+      color: var(--text-muted);
+      border: none;
+      font-family: var(--font-body);
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.4rem;
+      border-radius: 0.35rem;
+      flex: 1;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn.active {
+      background-color: var(--accent-cyan);
+      color: white;
+      box-shadow: 0 2px 8px rgba(6, 182, 212, 0.3);
+    }
+
+    .action-btn {
+      width: 100%;
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      border: none;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      color: white;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 10px rgba(6, 182, 212, 0.15);
+    }
+
+    .action-btn:hover:not(:disabled) {
+      opacity: 0.9;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 12px rgba(6, 182, 212, 0.25);
+    }
+
+    .action-btn:disabled {
+      background: #334155;
+      color: var(--text-muted);
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .recent-doc-pill {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(30, 41, 69, 0.4);
+      border: 1px solid var(--border-color);
+      border-radius: 0.35rem;
+      padding: 0.4rem 0.6rem;
+      font-size: 0.75rem;
+      cursor: pointer;
+      color: var(--text-main);
+      transition: all 0.2s ease;
+      gap: 0.5rem;
+    }
+
+    .recent-doc-pill:hover {
+      border-color: var(--accent-cyan);
+      background: rgba(30, 41, 69, 0.6);
+    }
+
+    .recent-doc-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .recent-doc-delete {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      font-weight: 700;
+      padding: 0 0.25rem;
+      border-radius: 0.25rem;
+    }
+
+    .recent-doc-delete:hover {
+      color: #ef4444;
+      background: rgba(239, 68, 68, 0.1);
     }
 
     /* Chat & Result Area */
@@ -538,6 +626,38 @@
       font-style: italic;
     }
 
+    /* Retrieval stats bar (per-response diagnostics) */
+    .meta-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 0.75rem 0 0.25rem;
+    }
+
+    .meta-chip {
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 0.15rem 0.5rem;
+      border-radius: 2rem;
+      background: rgba(6, 182, 212, 0.08);
+      border: 1px solid rgba(6, 182, 212, 0.25);
+      color: var(--accent-cyan);
+      white-space: nowrap;
+    }
+
+    /* Sub-label note (e.g. when a knob only applies in a certain mode) */
+    .field-note {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      margin-top: -0.25rem;
+    }
+
+    .form-group.disabled {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
     /* Input Dock */
     .input-dock {
       padding: 1.5rem 2rem 2rem;
@@ -716,6 +836,76 @@
     
     <!-- Sidebar Settings -->
     <aside class="settings-panel">
+
+      <!-- Ingest Section (Dev Mode) -->
+      <div>
+        <h3 class="settings-section-title">
+          <svg style="width: 1.1rem; height: 1.1rem; fill: currentColor;" viewBox="0 0 24 24">
+            <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+          </svg>
+          Ingest Documents (Dev)
+        </h3>
+
+        <!-- Tab switches -->
+        <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; background: rgba(15,23,42,0.4); padding: 0.25rem; border-radius: 0.5rem; border: 1px solid var(--border-color);">
+          <button type="button" id="tab-file" class="tab-btn active" onclick="switchIngestTab('file')">File</button>
+          <button type="button" id="tab-url" class="tab-btn" onclick="switchIngestTab('url')">Link / URL</button>
+        </div>
+
+        <!-- Ingest File form -->
+        <div id="ingest-file-wrap" class="ingest-wrap">
+          <div class="form-group">
+            <label for="file-upload">Upload File <span>.txt, .md, .pdf</span></label>
+            <input type="file" id="file-upload" accept=".txt,.md,.pdf,.mdx,.rst,.html,.htm" style="display: none;" onchange="handleFileSelected(this)">
+            <div id="file-drop-zone" onclick="document.getElementById('file-upload').click()" style="border: 2px dashed var(--border-color); border-radius: 0.5rem; padding: 1.25rem; text-align: center; cursor: pointer; transition: all 0.2s; background: rgba(15,23,42,0.2);">
+              <span id="drop-zone-text" style="font-size: 0.8rem; color: var(--text-muted);">Click to Choose Document</span>
+            </div>
+          </div>
+          <button type="button" id="btn-ingest-file" class="action-btn" onclick="submitIngestFile()" disabled>Ingest File</button>
+        </div>
+
+        <!-- Ingest URL form -->
+        <div id="ingest-url-wrap" class="ingest-wrap hidden">
+          <div class="form-group">
+            <label for="url-input">Web URL</label>
+            <input type="text" id="url-input" placeholder="https://example.com/page">
+          </div>
+          <button type="button" id="btn-ingest-url" class="action-btn" onclick="submitIngestUrl()">Ingest Link</button>
+        </div>
+
+        <!-- Chunking controls (shared by file & URL ingest) -->
+        <div style="margin-top: 0.5rem; border-top: 1px dashed var(--border-color); padding-top: 0.85rem;">
+          <div class="form-group">
+            <label for="ingest-strategy">Chunking Strategy</label>
+            <select id="ingest-strategy">
+              <option value="semantic">semantic — headings & paragraphs</option>
+              <option value="recursive">recursive — separator hierarchy</option>
+              <option value="fixed">fixed — uniform window</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="ingest-maxtokens">Max Tokens <span class="val" id="ingest-maxtokens-val">800</span></label>
+            <input type="range" id="ingest-maxtokens" min="100" max="2000" step="50" value="800" oninput="document.getElementById('ingest-maxtokens-val').innerText = this.value">
+          </div>
+          <div class="form-group">
+            <label for="ingest-overlap">Overlap <span class="val" id="ingest-overlap-val">80</span></label>
+            <input type="range" id="ingest-overlap" min="0" max="400" step="10" value="80" oninput="document.getElementById('ingest-overlap-val').innerText = this.value">
+          </div>
+        </div>
+
+        <!-- Status indicator -->
+        <div id="ingest-status" style="margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); min-height: 15px; text-align: center; font-weight: 500;"></div>
+
+        <!-- Quick Filters -->
+        <div id="recent-docs-section" class="hidden" style="margin-top: 1rem; border-top: 1px dashed var(--border-color); padding-top: 1rem;">
+          <label style="margin-bottom: 0.5rem; font-size: 0.8rem; font-weight: 600;">Quick Filters (Recent Ingests)</label>
+          <div id="recent-docs-list" style="display: flex; flex-direction: column; gap: 0.4rem; max-height: 120px; overflow-y: auto; padding-right: 2px;">
+            <!-- filled dynamically -->
+          </div>
+        </div>
+      </div>
+      
+      <!-- Retrieval Settings -->
       <div>
         <h3 class="settings-section-title">
           <svg style="width: 1rem; height: 1rem; fill: currentColor;" viewBox="0 0 24 24">
@@ -731,15 +921,41 @@
             <span class="toggle-desc">Combine vector & lexical search (RRF)</span>
           </div>
           <label class="switch" onclick="event.stopPropagation()">
-            <input type="checkbox" id="hybrid-search" checked>
+            <input type="checkbox" id="hybrid-search" checked onchange="syncHybridDeps()">
             <span class="slider"></span>
           </label>
+        </div>
+
+        <!-- Dense vs Lexical balance (hybrid only) -->
+        <div class="form-group" id="dense-group">
+          <label for="dense-pct">Dense ⇄ Lexical <span class="val" id="dense-val">50% dense</span></label>
+          <input type="range" id="dense-pct" min="0" max="100" step="5" value="50" oninput="updateDenseLabel(this.value)">
+          <span class="field-note">Weights vector vs keyword matches in RRF fusion.</span>
         </div>
 
         <!-- TopK Slider -->
         <div class="form-group">
           <label for="top-k">Limit (Top K) <span class="val" id="top-k-val">4</span></label>
           <input type="range" id="top-k" min="1" max="20" value="4" oninput="document.getElementById('top-k-val').innerText = this.value">
+        </div>
+
+        <!-- Score Threshold Slider -->
+        <div class="form-group">
+          <label for="score-threshold">Score Threshold <span class="val" id="threshold-val">0%</span></label>
+          <input type="range" id="score-threshold" min="0" max="100" step="5" value="0" oninput="document.getElementById('threshold-val').innerText = this.value + '%'">
+          <span class="field-note">Drop matches below this similarity (raw vector / rerank scores only).</span>
+        </div>
+
+        <!-- Rerank Toggle -->
+        <div class="toggle-container" onclick="toggleRerank()">
+          <div class="toggle-label-wrap">
+            <span class="toggle-title">Rerank</span>
+            <span class="toggle-desc">Cross-encoder precision (if enabled on server)</span>
+          </div>
+          <label class="switch" onclick="event.stopPropagation()">
+            <input type="checkbox" id="rerank-toggle" checked>
+            <span class="slider"></span>
+          </label>
         </div>
 
         <!-- Source Filter -->
@@ -751,16 +967,17 @@
         <!-- Doc Path Filter -->
         <div class="form-group">
           <label for="doc-path-filter">Document Path (Exact)</label>
-          <input type="text" id="doc-path-filter" placeholder="e.g. qdrant/landing_page/README.md">
+          <input type="text" id="doc-path-filter" placeholder="e.g. README.md">
         </div>
 
         <!-- Doc Path Prefix Filter -->
         <div class="form-group">
           <label for="doc-path-prefix">Document Path Prefix</label>
-          <input type="text" id="doc-path-prefix" placeholder="e.g. qdrant/landing_page/">
+          <input type="text" id="doc-path-prefix" placeholder="e.g. docs/">
         </div>
       </div>
 
+      <!-- Generation Settings -->
       <div>
         <h3 class="settings-section-title">
           <svg style="width: 1rem; height: 1rem; fill: currentColor;" viewBox="0 0 24 24">
@@ -844,6 +1061,21 @@
 
     function toggleHybrid() {
       hybridCheckbox.checked = !hybridCheckbox.checked;
+      syncHybridDeps();
+    }
+
+    function toggleRerank() {
+      const r = document.getElementById('rerank-toggle');
+      r.checked = !r.checked;
+    }
+
+    function updateDenseLabel(v) {
+      document.getElementById('dense-val').innerText = `${v}% dense`;
+    }
+
+    // The dense/lexical balance only applies when hybrid search is on.
+    function syncHybridDeps() {
+      document.getElementById('dense-group').classList.toggle('disabled', !hybridCheckbox.checked);
     }
 
     function selectSuggestion(text) {
@@ -885,6 +1117,9 @@
         query: query,
         topK: parseInt(document.getElementById('top-k').value),
         hybrid: hybridCheckbox.checked,
+        hybridDensePercent: parseInt(document.getElementById('dense-pct').value),
+        scoreThresholdPercent: parseInt(document.getElementById('score-threshold').value),
+        rerank: document.getElementById('rerank-toggle').checked,
         temperature: parseFloat(document.getElementById('temperature').value),
         maxTokens: parseInt(document.getElementById('max-tokens').value),
       };
@@ -978,6 +1213,20 @@
         contentHtml = `<div class="message-bubble" style="font-style: italic; color: var(--text-muted);">Retrieval completed. (No LLM generation is enabled on this Retriever service).</div>`;
       }
 
+      // Retrieval diagnostics — shows the effect of the tuning knobs used.
+      let metaHtml = '';
+      if (data.meta) {
+        const m = data.meta;
+        const chips = [
+          `${m.returned}/${m.candidates} chunks`,
+          m.hybrid ? `hybrid · ${m.hybridDensePercent}% dense` : 'vector',
+          m.reranked ? 'reranked' : null,
+          m.scoreThresholdPercent > 0 ? `≥ ${m.scoreThresholdPercent}%` : null,
+          `${m.tookMillis} ms`,
+        ].filter(Boolean);
+        metaHtml = `<div class="meta-bar">${chips.map(c => `<span class="meta-chip">${escapeHtml(c)}</span>`).join('')}</div>`;
+      }
+
       // Add sources
       let sourcesHtml = '';
       if (data.results && data.results.length > 0) {
@@ -986,7 +1235,7 @@
             <div class="source-card-header">
               <div class="source-pill-wrap">
                 <span class="source-pill">${escapeHtml(r.source)}</span>
-                <span class="source-path" title="${escapeHtml(r.docPath)}">${escapeHtml(r.docPath)}</span>
+                <span class="source-path" title="${escapeHtml(r.docPath)}" onclick="document.getElementById('doc-path-filter').value = '${escapeHtml(r.docPath)}'" style="cursor:pointer; text-decoration: underline;">${escapeHtml(r.docPath)}</span>
               </div>
               <span class="source-score">${r.score}</span>
             </div>
@@ -1020,6 +1269,7 @@
           🤖 kuberag
         </div>
         ${contentHtml}
+        ${metaHtml}
         ${sourcesHtml}
       `;
       playgroundLog.appendChild(msgWrap);
@@ -1064,6 +1314,200 @@
       formatted = formatted.replaceAll('\n', '<br>');
       return formatted;
     }
+
+    /* Ingestion Tab & Submission logic */
+    let currentIngestTab = 'file';
+    let selectedFile = null;
+
+    // Current chunking knobs from the ingest panel (shared by file & URL ingest).
+    // Overlap is clamped below maxTokens to avoid degenerate (heavily duplicated)
+    // chunks if the sliders cross.
+    function chunkingParams() {
+      const maxTokens = parseInt(document.getElementById('ingest-maxtokens').value);
+      const overlap = parseInt(document.getElementById('ingest-overlap').value);
+      return {
+        strategy: document.getElementById('ingest-strategy').value,
+        maxTokens: maxTokens,
+        overlap: Math.min(overlap, maxTokens - 1),
+      };
+    }
+
+    function switchIngestTab(tab) {
+      currentIngestTab = tab;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(`tab-${tab}`).classList.add('active');
+
+      if (tab === 'file') {
+        document.getElementById('ingest-file-wrap').classList.remove('hidden');
+        document.getElementById('ingest-url-wrap').classList.add('hidden');
+      } else {
+        document.getElementById('ingest-file-wrap').classList.add('hidden');
+        document.getElementById('ingest-url-wrap').classList.remove('hidden');
+      }
+      showStatus('', false);
+    }
+
+    function handleFileSelected(input) {
+      if (input.files && input.files.length > 0) {
+        selectedFile = input.files[0];
+        document.getElementById('drop-zone-text').innerText = selectedFile.name;
+        document.getElementById('drop-zone-text').style.color = 'var(--accent-cyan)';
+        document.getElementById('btn-ingest-file').disabled = false;
+      } else {
+        selectedFile = null;
+        document.getElementById('drop-zone-text').innerText = 'Click to Choose Document';
+        document.getElementById('drop-zone-text').style.color = 'var(--text-muted)';
+        document.getElementById('btn-ingest-file').disabled = true;
+      }
+    }
+
+    function showStatus(msg, isError, isLoading = false) {
+      const statusDiv = document.getElementById('ingest-status');
+      statusDiv.innerText = msg;
+      if (isError) {
+        statusDiv.style.color = '#ef4444';
+      } else if (isLoading) {
+        statusDiv.style.color = 'var(--accent-cyan)';
+      } else {
+        statusDiv.style.color = 'var(--accent-green)';
+      }
+    }
+
+    async function submitIngestFile() {
+      if (!selectedFile) return;
+      const btn = document.getElementById('btn-ingest-file');
+      btn.disabled = true;
+      showStatus('Extracting & Ingesting file...', false, true);
+
+      const ck = chunkingParams();
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      formData.append('source', 'playground');
+      formData.append('strategy', ck.strategy);
+      formData.append('maxTokens', ck.maxTokens);
+      formData.append('overlap', ck.overlap);
+
+      try {
+        const response = await fetch('/ingest/file', {
+          method: 'POST',
+          body: formData
+        });
+        const res = await response.json();
+        if (res.status === 'ok') {
+          showStatus(`Success! Ingested ${res.chunks} chunks.`, false);
+          addRecentDoc(res.filename);
+          // Reset file input
+          document.getElementById('file-upload').value = '';
+          selectedFile = null;
+          document.getElementById('drop-zone-text').innerText = 'Click to Choose Document';
+          document.getElementById('drop-zone-text').style.color = 'var(--text-muted)';
+        } else {
+          showStatus(`Error: ${res.message}`, true);
+          btn.disabled = false;
+        }
+      } catch (err) {
+        console.error(err);
+        showStatus(`Ingestion failed: ${err.message}`, true);
+        btn.disabled = false;
+      }
+    }
+
+    async function submitIngestUrl() {
+      const urlInput = document.getElementById('url-input');
+      const url = urlInput.value.trim();
+      if (!url) return;
+
+      const btn = document.getElementById('btn-ingest-url');
+      btn.disabled = true;
+      showStatus('Crawling & Ingesting URL...', false, true);
+
+      try {
+        const response = await fetch('/ingest/url', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            url: url,
+            source: 'playground',
+            ...chunkingParams()
+          })
+        });
+        const res = await response.json();
+        if (res.status === 'ok') {
+          showStatus(`Success! Ingested ${res.chunks} chunks.`, false);
+          addRecentDoc(res.url);
+          urlInput.value = '';
+        } else {
+          showStatus(`Error: ${res.message}`, true);
+        }
+      } catch (err) {
+        console.error(err);
+        showStatus(`Ingestion failed: ${err.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // LocalStorage Quick Doc Filters
+    function loadRecentDocs() {
+      const list = JSON.parse(localStorage.getItem('kuberag_recent_docs') || '[]');
+      const container = document.getElementById('recent-docs-section');
+      const listDiv = document.getElementById('recent-docs-list');
+
+      if (list.length === 0) {
+        container.classList.add('hidden');
+        return;
+      }
+
+      container.classList.remove('hidden');
+      listDiv.innerHTML = list.map(doc => `
+        <div class="recent-doc-pill" onclick="setDocFilter('${escapeHtml(doc)}')">
+          <span class="recent-doc-name" title="${escapeHtml(doc)}">${escapeHtml(doc)}</span>
+          <span class="recent-doc-delete" onclick="removeRecentDoc('${escapeHtml(doc)}', event)">&times;</span>
+        </div>
+      `).join('');
+    }
+
+    function addRecentDoc(docPath) {
+      let list = JSON.parse(localStorage.getItem('kuberag_recent_docs') || '[]');
+      list = list.filter(d => d !== docPath);
+      list.unshift(docPath);
+      // Limit to 5
+      if (list.length > 5) list = list.slice(0, 5);
+      localStorage.setItem('kuberag_recent_docs', JSON.stringify(list));
+      loadRecentDocs();
+    }
+
+    function removeRecentDoc(docPath, event) {
+      if (event) event.stopPropagation();
+      let list = JSON.parse(localStorage.getItem('kuberag_recent_docs') || '[]');
+      list = list.filter(d => d !== docPath);
+      localStorage.setItem('kuberag_recent_docs', JSON.stringify(list));
+      loadRecentDocs();
+
+      // Clear input filter if it matched
+      const exactFilter = document.getElementById('doc-path-filter');
+      if (exactFilter.value === docPath) {
+        exactFilter.value = '';
+      }
+    }
+
+    function setDocFilter(docPath) {
+      document.getElementById('doc-path-filter').value = docPath;
+      // Alert the user via text blink
+      const docInput = document.getElementById('doc-path-filter');
+      docInput.style.borderColor = 'var(--accent-cyan)';
+      setTimeout(() => {
+        docInput.style.borderColor = '';
+      }, 1000);
+    }
+
+    // Initialize document list & hybrid-dependent control state.
+    window.addEventListener('DOMContentLoaded', () => {
+      loadRecentDocs();
+      syncHybridDeps();
+    });
   </script>
 </body>
 </html>
