@@ -45,21 +45,21 @@ func TestEffectiveChunkingDefaults(t *testing.T) {
 
 func TestSpecHashStableAndSensitive(t *testing.T) {
 	kb := baseKB()
-	h1 := specHash(kb)
-	if h1 != specHash(kb) {
+	h1 := specHash(kb, "")
+	if h1 != specHash(kb, "") {
 		t.Fatal("specHash not deterministic")
 	}
 
 	// Changing the embedding model must change the hash.
 	kb.Spec.Embedding.Model = "bge-large"
-	if specHash(kb) == h1 {
+	if specHash(kb, "") == h1 {
 		t.Fatal("specHash should change when model changes")
 	}
 
 	// Changing spec chunking must change the hash.
 	kb2 := baseKB()
 	kb2.Spec.Chunking.MaxTokens = 500
-	if specHash(kb2) == h1 {
+	if specHash(kb2, "") == h1 {
 		t.Fatal("specHash should change when chunking changes")
 	}
 
@@ -69,14 +69,14 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 	tuned := specChunking(kb3)
 	tuned.Overlap += 40
 	kb3.Status.EffectiveChunking = &tuned
-	if specHash(kb3) != h1 {
+	if specHash(kb3, "") != h1 {
 		t.Fatal("specHash must ignore the auto-tune override")
 	}
 }
 
 func TestNeedsIngest(t *testing.T) {
 	kb := baseKB()
-	hash := specHash(kb)
+	hash := specHash(kb, "")
 
 	if _, need := needsIngest(kb, hash); !need {
 		t.Fatal("fresh KB with no observed hash should need ingest")
@@ -91,7 +91,7 @@ func TestNeedsIngest(t *testing.T) {
 
 	// Model drift.
 	kb.Spec.Embedding.Model = "bge-large"
-	newHash := specHash(kb)
+	newHash := specHash(kb, "")
 	if _, need := needsIngest(kb, newHash); !need {
 		t.Fatal("model change should trigger ingest")
 	}
@@ -100,7 +100,7 @@ func TestNeedsIngest(t *testing.T) {
 func TestNeedsIngestFreshness(t *testing.T) {
 	kb := baseKB()
 	kb.Spec.Freshness.Schedule = "*/5 * * * *" // every 5 minutes
-	hash := specHash(kb)
+	hash := specHash(kb, "")
 	kb.Status.ObservedSpecHash = hash
 	kb.Status.ObservedEmbeddingModel = "bge-small"
 
@@ -385,5 +385,46 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 	hash2 := r.computeSecretsHash(context.Background(), rt, kb)
 	if hash1 == hash2 {
 		t.Error("expected secret checksum hash to change when secret data is updated")
+	}
+}
+
+func TestKBSecretsHashAndWatch(t *testing.T) {
+	kb := baseKB()
+	r := &KnowledgeBaseReconciler{}
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ragv1alpha1.AddToScheme(scheme)
+
+	secret1 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-secret", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("git-token-value")},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1).Build()
+	r.Client = fakeClient
+
+	// Link git secret to the git source
+	kb.Spec.Sources[0].GitHub.TokenSecretRef = &ragv1alpha1.SecretKeyRef{
+		Name: "git-secret",
+		Key:  "token",
+	}
+
+	hash1 := r.computeSecretsHash(context.Background(), kb)
+	specHash1 := specHash(kb, hash1)
+
+	// Change secret value and verify both secrets hash and spec hash change
+	secret1.Data["token"] = []byte("git-token-value-updated")
+	fakeClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1).Build()
+	r.Client = fakeClient
+
+	hash2 := r.computeSecretsHash(context.Background(), kb)
+	specHash2 := specHash(kb, hash2)
+
+	if hash1 == hash2 {
+		t.Error("expected KB secrets hash to change when source secret is updated")
+	}
+	if specHash1 == specHash2 {
+		t.Error("expected KB spec hash to change when source secret is updated")
 	}
 }

@@ -20,7 +20,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
@@ -44,6 +46,7 @@ type KnowledgeBaseReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // Reconcile drives the actual knowledge state toward the desired spec.
 func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -84,7 +87,8 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	hash := specHash(&kb)
+	secretsHash := r.computeSecretsHash(ctx, &kb)
+	hash := specHash(&kb, secretsHash)
 	// If the user edited the spec while an auto-tuned chunking override is active,
 	// drop the override so the new ingestion honours the spec (otherwise the
 	// stored EffectiveChunking would mask the spec change).
@@ -425,17 +429,19 @@ func effectiveChunking(kb *ragv1alpha1.KnowledgeBase) ragv1alpha1.ChunkingSpec {
 // specHash fingerprints the user's intent (spec) so edits trigger re-ingestion.
 // It deliberately hashes spec chunking, not the effective (possibly auto-tuned)
 // chunking — auto-tune forces its own re-ingest by clearing ObservedSpecHash.
-func specHash(kb *ragv1alpha1.KnowledgeBase) string {
+func specHash(kb *ragv1alpha1.KnowledgeBase, secretsHash string) string {
 	material := struct {
-		Sources  []ragv1alpha1.Source
-		Chunking ragv1alpha1.ChunkingSpec
-		Model    string
-		Store    string
+		Sources     []ragv1alpha1.Source
+		Chunking    ragv1alpha1.ChunkingSpec
+		Model       string
+		Store       string
+		SecretsHash string
 	}{
-		Sources:  kb.Spec.Sources,
-		Chunking: specChunking(kb),
-		Model:    kb.Spec.Embedding.Model,
-		Store:    string(kb.Spec.VectorStore.Type) + "|" + kb.Spec.VectorStore.Endpoint,
+		Sources:     kb.Spec.Sources,
+		Chunking:    specChunking(kb),
+		Model:       kb.Spec.Embedding.Model,
+		Store:       string(kb.Spec.VectorStore.Type) + "|" + kb.Spec.VectorStore.Endpoint,
+		SecretsHash: secretsHash,
 	}
 	b, _ := json.Marshal(material)
 	sum := sha256.Sum256(b)
@@ -593,6 +599,63 @@ func setCondition(kb *ragv1alpha1.KnowledgeBase, condType string, status metav1.
 	})
 }
 
+func (r *KnowledgeBaseReconciler) computeSecretsHash(ctx context.Context, kb *ragv1alpha1.KnowledgeBase) string {
+	hasher := sha256.New()
+
+	// 1. kb.Spec.VectorStore.CredentialsSecretRef
+	if ref := kb.Spec.VectorStore.CredentialsSecretRef; ref != nil {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+			if val, ok := sec.Data[ref.Key]; ok {
+				hasher.Write(val)
+			}
+		}
+	}
+
+	// 2. kb.Spec.Embedding.APIKeySecretRef
+	if ref := kb.Spec.Embedding.APIKeySecretRef; ref != nil {
+		var sec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+			if val, ok := sec.Data[ref.Key]; ok {
+				hasher.Write(val)
+			}
+		}
+	}
+
+	// 3. Sources
+	for _, s := range kb.Spec.Sources {
+		if s.GitHub != nil && s.GitHub.TokenSecretRef != nil {
+			ref := s.GitHub.TokenSecretRef
+			var sec corev1.Secret
+			if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+				if val, ok := sec.Data[ref.Key]; ok {
+					hasher.Write(val)
+				}
+			}
+		}
+		if s.S3 != nil {
+			if ref := s.S3.AccessKeySecretRef; ref != nil {
+				var sec corev1.Secret
+				if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+					if val, ok := sec.Data[ref.Key]; ok {
+						hasher.Write(val)
+					}
+				}
+			}
+			if ref := s.S3.SecretKeySecretRef; ref != nil {
+				var sec corev1.Secret
+				if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
+					if val, ok := sec.Data[ref.Key]; ok {
+						hasher.Write(val)
+					}
+				}
+			}
+		}
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 // SetupWithManager wires the reconciler, owned-resource watches and the Job index.
 func (r *KnowledgeBaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &batchv1.Job{}, ownerKey,
@@ -610,5 +673,50 @@ func (r *KnowledgeBaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&ragv1alpha1.KnowledgeBase{}).
 		Owns(&batchv1.Job{}).
 		Owns(&ragv1alpha1.VectorIndex{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				secret, ok := obj.(*corev1.Secret)
+				if !ok {
+					return nil
+				}
+				var list ragv1alpha1.KnowledgeBaseList
+				if err := r.List(ctx, &list, client.InNamespace(secret.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []reconcile.Request
+				for _, kb := range list.Items {
+					referenced := false
+					if kb.Spec.VectorStore.CredentialsSecretRef != nil && kb.Spec.VectorStore.CredentialsSecretRef.Name == secret.Name {
+						referenced = true
+					}
+					if kb.Spec.Embedding.APIKeySecretRef != nil && kb.Spec.Embedding.APIKeySecretRef.Name == secret.Name {
+						referenced = true
+					}
+					for _, s := range kb.Spec.Sources {
+						if s.GitHub != nil && s.GitHub.TokenSecretRef != nil && s.GitHub.TokenSecretRef.Name == secret.Name {
+							referenced = true
+						}
+						if s.S3 != nil {
+							if s.S3.AccessKeySecretRef != nil && s.S3.AccessKeySecretRef.Name == secret.Name {
+								referenced = true
+							}
+							if s.S3.SecretKeySecretRef != nil && s.S3.SecretKeySecretRef.Name == secret.Name {
+								referenced = true
+							}
+						}
+					}
+					if referenced {
+						reqs = append(reqs, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Namespace: kb.Namespace,
+								Name:      kb.Name,
+							},
+						})
+					}
+				}
+				return reqs
+			}),
+		).
 		Complete(r)
 }
