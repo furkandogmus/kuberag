@@ -1,5 +1,8 @@
-# Build the operator binary.
-FROM golang:1.26 AS builder
+# Build the operator binary. Cross-compile to the target arch on the native
+# build platform so multi-arch builds don't pay the QEMU emulation tax.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
@@ -9,7 +12,7 @@ COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o manager ./cmd
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -a -o manager ./cmd
 
 # Minimal runtime image.
 FROM gcr.io/distroless/static:nonroot

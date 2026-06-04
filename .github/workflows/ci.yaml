@@ -14,8 +14,21 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
   go:
-    name: go (build, lint, unit + integration)
+    name: go (build, unit + integration)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

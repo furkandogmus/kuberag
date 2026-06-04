@@ -120,7 +120,7 @@ func (r *VectorIndexReconciler) probeQdrant(ctx context.Context, vi *ragv1alpha1
 	if err != nil {
 		return probeResult{health: ragv1alpha1.IndexUnknown, message: fmt.Sprintf("probe error: %v", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return probeResult{health: ragv1alpha1.IndexMissing, message: "collection does not exist yet"}

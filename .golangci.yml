@@ -1,0 +1,13 @@
+version: "2"
+
+# Standard linters (errcheck, govet, ineffassign, staticcheck, unused) plus a
+# couple of low-noise additions.
+linters:
+  enable:
+    - misspell
+    - unconvert
+  exclusions:
+    rules:
+      # Generated DeepCopy code is not ours to lint.
+      - path: zz_generated\.deepcopy\.go
+        linters: [all]
