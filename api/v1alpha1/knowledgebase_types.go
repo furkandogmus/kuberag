@@ -109,6 +109,7 @@ const (
 )
 
 // ChunkingSpec controls how source documents are split into chunks.
+// +kubebuilder:validation:XValidation:rule="self.overlap < self.maxTokens",message="overlap must be strictly less than maxTokens"
 type ChunkingSpec struct {
 	// +kubebuilder:default=semantic
 	// +optional
@@ -124,6 +125,7 @@ type ChunkingSpec struct {
 }
 
 // EmbeddingSpec selects the embedding model. Changing Model triggers a full re-embed.
+// +kubebuilder:validation:XValidation:rule="self.provider != 'openai-compatible' || (has(self.baseURL) && self.baseURL != '')",message="baseURL is required when provider is openai-compatible"
 type EmbeddingSpec struct {
 	// Model name, e.g. "bge-small", "bge-large", "text-embedding-3-small".
 	// +kubebuilder:default=bge-small
@@ -287,8 +289,10 @@ type AutoTuneSpec struct {
 // ---------------------------------------------------------------------------
 
 // KnowledgeBaseSpec is the desired knowledge state.
+// +kubebuilder:validation:XValidation:rule="self.sources.all(s1, size(self.sources.filter(s2, s2.name == s1.name)) == 1)",message="source names must be unique within a KnowledgeBase"
 type KnowledgeBaseSpec struct {
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=5
 	Sources []Source `json:"sources"`
 	// +optional
 	Chunking ChunkingSpec `json:"chunking,omitempty"`

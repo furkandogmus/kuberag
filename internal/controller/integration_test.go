@@ -281,3 +281,61 @@ func TestRetrieverCreatesServingWorkload(t *testing.T) {
 		return k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "served-retriever"}, &svc)
 	})
 }
+
+func TestCRDValidations(t *testing.T) {
+	ns := newNamespace(t)
+
+	// 1. Test overlap >= maxTokens validation
+	kb1 := sampleKB(ns, "invalid-overlap")
+	kb1.Spec.Chunking = ragv1alpha1.ChunkingSpec{
+		Strategy:  ragv1alpha1.ChunkFixed,
+		MaxTokens: 100,
+		Overlap:   100, // Invalid: overlap must be < maxTokens
+	}
+	err := k8sClient.Create(testCtx, kb1)
+	if err == nil {
+		t.Error("expected creation of KnowledgeBase with overlap >= maxTokens to fail")
+	}
+
+	// 2. Test duplicate source names validation
+	kb2 := sampleKB(ns, "duplicate-sources")
+	kb2.Spec.Sources = []ragv1alpha1.Source{
+		{Name: "src1", Type: ragv1alpha1.SourceGitHub, GitHub: &ragv1alpha1.GitHubSource{Repo: "org/docs"}},
+		{Name: "src1", Type: ragv1alpha1.SourceGitHub, GitHub: &ragv1alpha1.GitHubSource{Repo: "org/wiki"}},
+	}
+	err = k8sClient.Create(testCtx, kb2)
+	if err == nil {
+		t.Error("expected creation of KnowledgeBase with duplicate source names to fail")
+	}
+
+	// 3. Test openai-compatible embedding without baseURL validation
+	kb3 := sampleKB(ns, "missing-baseurl-embedding")
+	kb3.Spec.Embedding = ragv1alpha1.EmbeddingSpec{
+		Model:    "custom-model",
+		Provider: "openai-compatible",
+		// BaseURL: "", // Invalid: required when provider is openai-compatible
+	}
+	err = k8sClient.Create(testCtx, kb3)
+	if err == nil {
+		t.Error("expected creation of KnowledgeBase with openai-compatible embedding but missing baseURL to fail")
+	}
+
+	// 4. Test openai-compatible generation without baseURL validation
+	rt := &ragv1alpha1.Retriever{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-baseurl-gen", Namespace: ns},
+		Spec: ragv1alpha1.RetrieverSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: "served"},
+			Replicas:         1,
+			Generation: &ragv1alpha1.GenerationSpec{
+				Enabled:  boolPtr(true),
+				Provider: "openai-compatible",
+				Model:    "custom-chat-model",
+				// BaseURL: "", // Invalid: required when provider is openai-compatible
+			},
+		},
+	}
+	err = k8sClient.Create(testCtx, rt)
+	if err == nil {
+		t.Error("expected creation of Retriever with openai-compatible generation but missing baseURL to fail")
+	}
+}

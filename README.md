@@ -2,8 +2,9 @@
 
 [![ci](https://github.com/furkandogmus/kuberag/actions/workflows/ci.yaml/badge.svg)](https://github.com/furkandogmus/kuberag/actions/workflows/ci.yaml)
 
-A Kubernetes operator that manages **RAG** (Retrieval-Augmented Generation)
-knowledge bases **declaratively**.
+Kubernetes-native operator for declarative RAG knowledge bases.
+
+`kuberag` is a **RAG lifecycle operator** (managing synchronization, chunking, embedding, vector store ingestion, evaluation, auto-tuning, and serving) rather than an application-level framework (like LangChain or LlamaIndex). It automates and manages the infrastructure and operations layer of RAG.
 
 You describe the *desired knowledge state* — sources, chunking, embedding model,
 vector store, freshness, retrieval-quality target — and the operator continuously
@@ -134,10 +135,10 @@ make worker-rbac        # worker ServiceAccount/RBAC (per KB namespace)
 make docker-build-all   # operator + worker + retriever images
 ```
 
-Or run the whole thing on a throwaway k3d cluster with one script:
+Or run the whole thing on a throwaway k3d cluster with one command:
 
 ```bash
-./hack/demo.sh          # k3d up -> deploy -> ingest a repo -> query
+make demo               # k3d up -> deploy -> ingest a repo -> query
 ```
 
 ### Fully local RAG with Ollama (no API keys)

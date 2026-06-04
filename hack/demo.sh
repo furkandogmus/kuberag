@@ -6,6 +6,10 @@
 # Cleanup: k3d cluster delete kuberag-demo
 set -euo pipefail
 
+# Ensure required CLI dependencies are installed
+type k3d >/dev/null 2>&1 || { echo "ERROR: k3d is required but not installed. Aborting." >&2; exit 1; }
+type jq >/dev/null 2>&1 || { echo "ERROR: jq is required but not installed. Aborting." >&2; exit 1; }
+
 CLUSTER="${CLUSTER:-kuberag-demo}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 

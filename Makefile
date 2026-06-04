@@ -39,8 +39,12 @@ build: generate fmt vet ## Build the operator binary.
 test-py-deps: ## Install Python test dependencies into a local venv.
 	$(PYTHON) -m venv $(PYTEST_VENV)
 	$(PYTEST_PYTHON) -m pip install -r worker/requirements-test.txt
-test-py: test-py-deps ## Run Python worker tests.
+test-py: ## Run Python worker tests.
 	$(PYTEST_PYTHON) -m unittest discover -s worker/tests
+
+.PHONY: demo
+demo: ## Create a k3d cluster and run a full end-to-end demo.
+	./hack/demo.sh
 
 .PHONY: run
 run: generate ## Run the operator against the current kubeconfig.

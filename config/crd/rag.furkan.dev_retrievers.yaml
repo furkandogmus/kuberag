@@ -1017,6 +1017,10 @@ spec:
                 - model
                 - provider
                 type: object
+                x-kubernetes-validations:
+                - message: baseURL is required when provider is openai-compatible
+                  rule: self.provider != 'openai-compatible' || (has(self.baseURL)
+                    && self.baseURL != '')
               image:
                 description: Image overrides the retriever server image.
                 type: string

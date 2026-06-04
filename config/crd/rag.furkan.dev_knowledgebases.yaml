@@ -81,6 +81,9 @@ spec:
                     - fixed
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: overlap must be strictly less than maxTokens
+                  rule: self.overlap < self.maxTokens
               embedding:
                 description: EmbeddingSpec selects the embedding model. Changing Model
                   triggers a full re-embed.
@@ -129,6 +132,10 @@ spec:
                 required:
                 - model
                 type: object
+                x-kubernetes-validations:
+                - message: baseURL is required when provider is openai-compatible
+                  rule: self.provider != 'openai-compatible' || (has(self.baseURL)
+                    && self.baseURL != '')
               freshness:
                 description: FreshnessSpec controls how often the source is re-synced.
                 properties:
@@ -1306,6 +1313,7 @@ spec:
                     rule: self.type != 's3' || has(self.s3)
                   - message: web block required when type is web
                     rule: self.type != 'web' || has(self.web)
+                maxItems: 5
                 minItems: 1
                 type: array
               suspend:
@@ -1366,6 +1374,10 @@ spec:
             - sources
             - vectorStore
             type: object
+            x-kubernetes-validations:
+            - message: source names must be unique within a KnowledgeBase
+              rule: self.sources.all(s1, size(self.sources.filter(s2, s2.name == s1.name))
+                == 1)
           status:
             description: KnowledgeBaseStatus is the observed knowledge state.
             properties:
@@ -1454,6 +1466,9 @@ spec:
                     - fixed
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: overlap must be strictly less than maxTokens
+                  rule: self.overlap < self.maxTokens
               evalRound:
                 description: |-
                   EvalRound increments per evaluation run so each eval Job gets a unique name
