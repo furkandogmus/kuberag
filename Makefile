@@ -18,6 +18,9 @@ manifests: ## Generate CRD + RBAC manifests.
 
 ENVTEST_VERSION ?= release-0.19
 ENVTEST_K8S_VERSION ?= 1.31.0
+PYTHON ?= python3
+PYTEST_VENV ?= .venv-test
+PYTEST_PYTHON := $(PYTEST_VENV)/bin/python
 
 .PHONY: fmt vet build test test-integration
 fmt:
@@ -32,9 +35,12 @@ test-integration: generate ## Run envtest integration tests (downloads kube-apis
 build: generate fmt vet ## Build the operator binary.
 	go build -o bin/manager ./cmd
 
-.PHONY: test-py
-test-py: ## Run Python worker tests.
-	cd worker && python3 -m unittest discover -s tests
+.PHONY: test-py test-py-deps
+test-py-deps: ## Install Python test dependencies into a local venv.
+	$(PYTHON) -m venv $(PYTEST_VENV)
+	$(PYTEST_PYTHON) -m pip install -r worker/requirements-test.txt
+test-py: test-py-deps ## Run Python worker tests.
+	$(PYTEST_PYTHON) -m unittest discover -s worker/tests
 
 .PHONY: run
 run: generate ## Run the operator against the current kubeconfig.

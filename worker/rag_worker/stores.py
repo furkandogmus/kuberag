@@ -5,6 +5,7 @@ Payload always carries: source (name), doc_path, text, chunk_hash.
 """
 from __future__ import annotations
 
+import json
 import os
 from abc import ABC, abstractmethod
 
@@ -98,10 +99,7 @@ class QdrantStore(VectorStore):
                 collection_name=self.collection,
                 vectors_config=models.VectorParams(size=dim, distance=self._distance()),
             )
-            self.client.create_payload_index(
-                self.collection, field_name="source",
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
+        self._ensure_payload_indexes()
 
     def recreate_collection(self, dim: int, distance: str) -> None:
         from qdrant_client import models
@@ -110,10 +108,25 @@ class QdrantStore(VectorStore):
             collection_name=self.collection,
             vectors_config=models.VectorParams(size=dim, distance=self._distance()),
         )
-        self.client.create_payload_index(
-            self.collection, field_name="source",
-            field_schema=models.PayloadSchemaType.KEYWORD,
-        )
+        self._ensure_payload_indexes()
+
+    def _ensure_payload_indexes(self) -> None:
+        from qdrant_client import models
+
+        self._create_payload_index("source", models.PayloadSchemaType.KEYWORD)
+        self._create_payload_index("doc_path", models.PayloadSchemaType.KEYWORD)
+        self._create_payload_index("text", models.PayloadSchemaType.TEXT)
+
+    def _create_payload_index(self, field_name: str, field_schema) -> None:
+        try:
+            self.client.create_payload_index(
+                self.collection,
+                field_name=field_name,
+                field_schema=field_schema,
+            )
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                raise
 
     def delete_by_source(self, source_name: str) -> None:
         from qdrant_client import models
@@ -423,14 +436,14 @@ class MilvusStore(VectorStore):
     ) -> str | None:
         exprs = []
         if source is not None:
-            exprs.append(f'source == "{source}"')
+            exprs.append(f"source == {_milvus_literal(source)}")
         if doc_path is not None:
-            exprs.append(f'doc_path == "{doc_path}"')
+            exprs.append(f"doc_path == {_milvus_literal(doc_path)}")
         if doc_path_prefix is not None:
-            exprs.append(f'doc_path like "{doc_path_prefix}%"')
+            exprs.append(f"doc_path like {_milvus_literal(doc_path_prefix + '%')}")
         if text_query is not None:
-            exprs.append(f'text like "%{text_query}%"')
-        
+            exprs.append(f"text like {_milvus_literal('%' + text_query + '%')}")
+
         return " and ".join(exprs) if exprs else None
 
     def search(
@@ -480,3 +493,7 @@ class MilvusStore(VectorStore):
 
 def _sanitize(name: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+
+
+def _milvus_literal(value: str) -> str:
+    return json.dumps(value)

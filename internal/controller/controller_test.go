@@ -63,6 +63,22 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 		t.Fatal("specHash should change when chunking changes")
 	}
 
+	// Changing embedding provider details must change the hash even when the
+	// model name stays the same.
+	kbProvider := baseKB()
+	kbProvider.Spec.Embedding.Provider = "openai-compatible"
+	kbProvider.Spec.Embedding.BaseURL = "http://embeddings:8080/v1"
+	if specHash(kbProvider, "") == h1 {
+		t.Fatal("specHash should change when embedding provider details change")
+	}
+
+	// Changing the target collection must trigger re-ingestion into the new store location.
+	kbStore := baseKB()
+	kbStore.Spec.VectorStore.Collection = "other-collection"
+	if specHash(kbStore, "") == h1 {
+		t.Fatal("specHash should change when vector store collection changes")
+	}
+
 	// An auto-tuned override (status) must NOT change the hash — auto-tune
 	// forces re-ingest by clearing ObservedSpecHash, not via the hash.
 	kb3 := baseKB()
@@ -71,6 +87,23 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 	kb3.Status.EffectiveChunking = &tuned
 	if specHash(kb3, "") != h1 {
 		t.Fatal("specHash must ignore the auto-tune override")
+	}
+}
+
+func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
+	kb := baseKB()
+	jobEff := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 500, Overlap: 50}
+	job, err := buildIngestJob(kb, "oldhash", ragv1alpha1.IngestFull, jobEff)
+	if err != nil {
+		t.Fatalf("buildIngestJob returned error: %v", err)
+	}
+
+	currentEff := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 900, Overlap: 90}
+	if got := jobSpecHash(job, "newhash"); got != "oldhash" {
+		t.Fatalf("expected completed job hash oldhash, got %q", got)
+	}
+	if got := jobEffectiveChunking(job, currentEff); got != jobEff {
+		t.Fatalf("expected job chunking %+v, got %+v", jobEff, got)
 	}
 }
 
@@ -222,7 +255,10 @@ func TestAutoTuneHelpers(t *testing.T) {
 func TestSecurityContextHardening(t *testing.T) {
 	kb := baseKB()
 	// Test baseJob security context and volumes
-	job := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	job, err := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	if err != nil {
+		t.Fatalf("baseJob returned error: %v", err)
+	}
 	if job == nil {
 		t.Fatal("expected non-nil Job")
 	}
@@ -332,7 +368,10 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 		{Key: "cpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	}
 
-	job := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	job, err := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	if err != nil {
+		t.Fatalf("baseJob returned error: %v", err)
+	}
 	if job == nil {
 		t.Fatal("expected non-nil Job")
 	}
@@ -426,5 +465,14 @@ func TestKBSecretsHashAndWatch(t *testing.T) {
 	}
 	if specHash1 == specHash2 {
 		t.Error("expected KB spec hash to change when source secret is updated")
+	}
+}
+
+func TestInvalidIngestionResourcesReturnError(t *testing.T) {
+	kb := baseKB()
+	kb.Spec.Ingestion.Resources = &ragv1alpha1.ResourceRequirements{CPU: "not-a-quantity"}
+
+	if _, err := buildIngestJob(kb, "hash123", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
+		t.Fatal("expected invalid ingestion resources to return an error")
 	}
 }

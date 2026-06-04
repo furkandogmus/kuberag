@@ -124,7 +124,7 @@ func credentialEnv(kb *ragv1alpha1.KnowledgeBase) []corev1.EnvVar {
 }
 
 // resourceRequirements maps the trimmed spec into a core/v1 ResourceRequirements.
-func resourceRequirements(rr *ragv1alpha1.ResourceRequirements) corev1.ResourceRequirements {
+func resourceRequirements(rr *ragv1alpha1.ResourceRequirements) (corev1.ResourceRequirements, error) {
 	out := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{},
 		Limits:   corev1.ResourceList{},
@@ -136,21 +136,27 @@ func resourceRequirements(rr *ragv1alpha1.ResourceRequirements) corev1.ResourceR
 	out.Limits[corev1.ResourceMemory] = resource.MustParse("4Gi")
 	if rr != nil {
 		if rr.CPU != "" {
-			q := resource.MustParse(rr.CPU)
+			q, err := resource.ParseQuantity(rr.CPU)
+			if err != nil {
+				return out, fmt.Errorf("invalid ingestion resources.cpu %q: %w", rr.CPU, err)
+			}
 			out.Requests[corev1.ResourceCPU] = q
 			out.Limits[corev1.ResourceCPU] = q
 		}
 		if rr.Memory != "" {
-			q := resource.MustParse(rr.Memory)
+			q, err := resource.ParseQuantity(rr.Memory)
+			if err != nil {
+				return out, fmt.Errorf("invalid ingestion resources.memory %q: %w", rr.Memory, err)
+			}
 			out.Requests[corev1.ResourceMemory] = q
 			out.Limits[corev1.ResourceMemory] = q
 		}
 	}
-	return out
+	return out, nil
 }
 
 // baseJob assembles the common Job skeleton for a worker invocation.
-func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, args []string, extraEnv []corev1.EnvVar) *batchv1.Job {
+func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, args []string, extraEnv []corev1.EnvVar) (*batchv1.Job, error) {
 	backoff := int32(2)
 	// Short TTL so finished Jobs are GC'd well before the next scheduled run,
 	// avoiding name collisions on freshness re-syncs of an unchanged spec.
@@ -168,6 +174,11 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 	env = append(env, scratchEnv()...)
 	env = append(env, extraEnv...)
 	env = append(env, credentialEnv(kb)...)
+
+	resources, err := resourceRequirements(kb.Spec.Ingestion.Resources)
+	if err != nil {
+		return nil, err
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -199,7 +210,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Args:            args,
 							Env:             env,
-							Resources:       resourceRequirements(kb.Spec.Ingestion.Resources),
+							Resources:       resources,
 							SecurityContext: hardenedContainerSecurityContext(),
 							VolumeMounts:    []corev1.VolumeMount{scratchMount()},
 						},
@@ -207,7 +218,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 // buildIngestJob renders the ingestion Job (clone/chunk/embed/upsert).
@@ -222,7 +233,7 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1
 		{Name: "INGEST_MODE", Value: string(mode)},
 		{Name: "PRIOR_SOURCES_JSON", Value: priorSourcesJSON(kb)},
 	}
-	return baseJob(kb, name, jobTypeIngest, hash, []string{"ingest"}, env), nil
+	return baseJob(kb, name, jobTypeIngest, hash, []string{"ingest"}, env)
 }
 
 // buildEvalJob renders the retrieval-quality evaluation Job. The round counter
@@ -239,7 +250,7 @@ func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash string, round int, effChun
 		{Name: "EVAL_DATASET_CONFIGMAP", Value: rq.DatasetRef.Name},
 		{Name: "EVAL_TOPK", Value: fmt.Sprintf("%d", defaultInt(rq.TopK, 8))},
 	}
-	return baseJob(kb, name, jobTypeEval, hash, []string{"eval"}, env), nil
+	return baseJob(kb, name, jobTypeEval, hash, []string{"eval"}, env)
 }
 
 // buildCleanupJob renders the teardown Job that drops the remote collection.
@@ -250,7 +261,10 @@ func buildCleanupJob(kb *ragv1alpha1.KnowledgeBase) (*batchv1.Job, error) {
 	}
 	name := truncName(fmt.Sprintf("%s-cleanup", kb.Name))
 	env := []corev1.EnvVar{{Name: "KB_SPEC_JSON", Value: specJSON}}
-	job := baseJob(kb, name, jobTypeCleanup, "", []string{"cleanup"}, env)
+	job, err := baseJob(kb, name, jobTypeCleanup, "", []string{"cleanup"}, env)
+	if err != nil {
+		return nil, err
+	}
 	// Cleanup must not retry forever during deletion.
 	zero := int32(1)
 	job.Spec.BackoffLimit = &zero

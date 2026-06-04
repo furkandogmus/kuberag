@@ -94,35 +94,11 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *RetrieverReconciler) computeSecretsHash(ctx context.Context, rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase) string {
 	hasher := sha256.New()
 
-	// 1. kb.Spec.VectorStore.CredentialsSecretRef
-	if ref := kb.Spec.VectorStore.CredentialsSecretRef; ref != nil {
-		var sec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-			if val, ok := sec.Data[ref.Key]; ok {
-				hasher.Write(val)
-			}
-		}
-	}
+	appendSecretHash(ctx, r.Client, kb.Namespace, "vectorStore.credentials", kb.Spec.VectorStore.CredentialsSecretRef, hasher)
+	appendSecretHash(ctx, r.Client, kb.Namespace, "embedding.apiKey", kb.Spec.Embedding.APIKeySecretRef, hasher)
 
-	// 2. kb.Spec.Embedding.APIKeySecretRef
-	if ref := kb.Spec.Embedding.APIKeySecretRef; ref != nil {
-		var sec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-			if val, ok := sec.Data[ref.Key]; ok {
-				hasher.Write(val)
-			}
-		}
-	}
-
-	// 3. rt.Spec.Generation.APIKeySecretRef
 	if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil {
-		ref := rt.Spec.Generation.APIKeySecretRef
-		var sec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: rt.Namespace, Name: ref.Name}, &sec); err == nil {
-			if val, ok := sec.Data[ref.Key]; ok {
-				hasher.Write(val)
-			}
-		}
+		appendSecretHash(ctx, r.Client, rt.Namespace, "generation.apiKey", rt.Spec.Generation.APIKeySecretRef, hasher)
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil))

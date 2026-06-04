@@ -146,7 +146,7 @@ func (r *KnowledgeBaseReconciler) reconcileActiveJob(
 
 	switch jobType(&job) {
 	case jobTypeIngest:
-		return r.finalizeIngest(ctx, kb, &job, eff, hash)
+		return r.finalizeIngest(ctx, kb, &job, jobEffectiveChunking(&job, eff), jobSpecHash(&job, hash))
 	case jobTypeEval:
 		return r.finalizeEval(ctx, kb, &job)
 	default:
@@ -158,9 +158,8 @@ func (r *KnowledgeBaseReconciler) reconcileActiveJob(
 func (r *KnowledgeBaseReconciler) finalizeIngest(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, job *batchv1.Job, eff ragv1alpha1.ChunkingSpec, hash string,
 ) (ctrl.Result, bool, error) {
-	defer r.deleteResult(ctx, kb.Namespace, job.Name)
-
 	if jobFailed(job) {
+		r.deleteResult(ctx, kb.Namespace, job.Name)
 		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		kb.Status.ActiveJob = ""
 		ingestionsTotal.WithLabelValues(kb.Name, "failed").Inc()
@@ -178,6 +177,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		// Result not yet visible; retry shortly.
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 	}
+	r.deleteResult(ctx, kb.Namespace, job.Name)
 
 	kb.Status.Phase = ragv1alpha1.PhaseReady
 	kb.Status.ObservedSpecHash = hash
@@ -205,10 +205,10 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 func (r *KnowledgeBaseReconciler) finalizeEval(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, job *batchv1.Job,
 ) (ctrl.Result, bool, error) {
-	defer r.deleteResult(ctx, kb.Namespace, job.Name)
 	kb.Status.ActiveJob = ""
 
 	if jobFailed(job) {
+		r.deleteResult(ctx, kb.Namespace, job.Name)
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "EvalFailed", "evaluation job failed")
 		r.event(kb, corev1.EventTypeWarning, "EvalFailed", "evaluation job %s failed", job.Name)
 		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
@@ -218,6 +218,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	if err := r.readResult(ctx, kb.Namespace, job.Name, &result); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 	}
+	r.deleteResult(ctx, kb.Namespace, job.Name)
 
 	now := metav1.Now()
 	kb.Status.Evaluation = &ragv1alpha1.EvaluationStatus{
@@ -433,14 +434,14 @@ func specHash(kb *ragv1alpha1.KnowledgeBase, secretsHash string) string {
 	material := struct {
 		Sources     []ragv1alpha1.Source
 		Chunking    ragv1alpha1.ChunkingSpec
-		Model       string
-		Store       string
+		Embedding   ragv1alpha1.EmbeddingSpec
+		VectorStore ragv1alpha1.VectorStoreSpec
 		SecretsHash string
 	}{
 		Sources:     kb.Spec.Sources,
 		Chunking:    specChunking(kb),
-		Model:       kb.Spec.Embedding.Model,
-		Store:       string(kb.Spec.VectorStore.Type) + "|" + kb.Spec.VectorStore.Endpoint,
+		Embedding:   kb.Spec.Embedding,
+		VectorStore: kb.Spec.VectorStore,
 		SecretsHash: secretsHash,
 	}
 	b, _ := json.Marshal(material)
@@ -458,7 +459,7 @@ func needsIngest(kb *ragv1alpha1.KnowledgeBase, desiredHash string) (reason stri
 			kb.Status.ObservedEmbeddingModel, kb.Spec.Embedding.Model), true
 	}
 	if kb.Status.ObservedSpecHash != desiredHash {
-		return "spec changed (sources/chunking/store)", true
+		return "spec changed (sources/chunking/embedding/store/secret)", true
 	}
 	if kb.Spec.Freshness.Schedule != "" {
 		var last time.Time
@@ -589,6 +590,37 @@ func jobFailed(j *batchv1.Job) bool {
 	return false
 }
 
+func jobSpecHash(j *batchv1.Job, fallback string) string {
+	if j.Labels != nil && j.Labels[labelSpecHash] != "" {
+		return j.Labels[labelSpecHash]
+	}
+	return fallback
+}
+
+func jobEffectiveChunking(j *batchv1.Job, fallback ragv1alpha1.ChunkingSpec) ragv1alpha1.ChunkingSpec {
+	raw, ok := jobEnvValue(j, "KB_SPEC_JSON")
+	if !ok {
+		return fallback
+	}
+	var spec ragv1alpha1.KnowledgeBaseSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		return fallback
+	}
+	return specChunking(&ragv1alpha1.KnowledgeBase{Spec: spec})
+}
+
+func jobEnvValue(j *batchv1.Job, name string) (string, bool) {
+	if len(j.Spec.Template.Spec.Containers) == 0 {
+		return "", false
+	}
+	for _, env := range j.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == name {
+			return env.Value, true
+		}
+	}
+	return "", false
+}
+
 func setCondition(kb *ragv1alpha1.KnowledgeBase, condType string, status metav1.ConditionStatus, reason, msg string) {
 	meta.SetStatusCondition(&kb.Status.Conditions, metav1.Condition{
 		Type:               condType,
@@ -602,54 +634,16 @@ func setCondition(kb *ragv1alpha1.KnowledgeBase, condType string, status metav1.
 func (r *KnowledgeBaseReconciler) computeSecretsHash(ctx context.Context, kb *ragv1alpha1.KnowledgeBase) string {
 	hasher := sha256.New()
 
-	// 1. kb.Spec.VectorStore.CredentialsSecretRef
-	if ref := kb.Spec.VectorStore.CredentialsSecretRef; ref != nil {
-		var sec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-			if val, ok := sec.Data[ref.Key]; ok {
-				hasher.Write(val)
-			}
-		}
-	}
+	appendSecretHash(ctx, r.Client, kb.Namespace, "vectorStore.credentials", kb.Spec.VectorStore.CredentialsSecretRef, hasher)
+	appendSecretHash(ctx, r.Client, kb.Namespace, "embedding.apiKey", kb.Spec.Embedding.APIKeySecretRef, hasher)
 
-	// 2. kb.Spec.Embedding.APIKeySecretRef
-	if ref := kb.Spec.Embedding.APIKeySecretRef; ref != nil {
-		var sec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-			if val, ok := sec.Data[ref.Key]; ok {
-				hasher.Write(val)
-			}
-		}
-	}
-
-	// 3. Sources
 	for _, s := range kb.Spec.Sources {
 		if s.GitHub != nil && s.GitHub.TokenSecretRef != nil {
-			ref := s.GitHub.TokenSecretRef
-			var sec corev1.Secret
-			if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-				if val, ok := sec.Data[ref.Key]; ok {
-					hasher.Write(val)
-				}
-			}
+			appendSecretHash(ctx, r.Client, kb.Namespace, "source.github."+s.Name, s.GitHub.TokenSecretRef, hasher)
 		}
 		if s.S3 != nil {
-			if ref := s.S3.AccessKeySecretRef; ref != nil {
-				var sec corev1.Secret
-				if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-					if val, ok := sec.Data[ref.Key]; ok {
-						hasher.Write(val)
-					}
-				}
-			}
-			if ref := s.S3.SecretKeySecretRef; ref != nil {
-				var sec corev1.Secret
-				if err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: ref.Name}, &sec); err == nil {
-					if val, ok := sec.Data[ref.Key]; ok {
-						hasher.Write(val)
-					}
-				}
-			}
+			appendSecretHash(ctx, r.Client, kb.Namespace, "source.s3.access."+s.Name, s.S3.AccessKeySecretRef, hasher)
+			appendSecretHash(ctx, r.Client, kb.Namespace, "source.s3.secret."+s.Name, s.S3.SecretKeySecretRef, hasher)
 		}
 	}
 

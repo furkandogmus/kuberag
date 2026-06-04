@@ -19,14 +19,21 @@ def load_spec() -> dict:
     return json.loads(raw)
 
 
-def prior_sources() -> dict[str, str]:
-    """Map source name -> last-synced revision, from the operator."""
+def prior_sources() -> dict[str, dict]:
+    """Map source name -> last-synced status, from the operator."""
     raw = os.environ.get("PRIOR_SOURCES_JSON", "") or "[]"
     try:
         items = json.loads(raw) or []
     except json.JSONDecodeError:
         return {}
-    return {s["name"]: s.get("revision", "") for s in items if "name" in s}
+    return {
+        s["name"]: {
+            "revision": s.get("revision", ""),
+            "chunks": int(s.get("chunks", 0) or 0),
+        }
+        for s in items
+        if "name" in s
+    }
 
 
 def chunk_hash(text: str) -> str:

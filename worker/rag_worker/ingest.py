@@ -42,7 +42,7 @@ def run() -> None:
             # points untouched.
             if mode != "full":
                 probe = sources.probe_revision(src)
-                if probe is not None and probe == prior.get(name):
+                if probe is not None and probe == _prior_revision(prior, name):
                     log(f"source '{name}' unchanged (rev {probe}); skipping")
                     source_results.append({"name": name, "revision": probe, "chunks": _carry_chunks(prior, name)})
                     continue
@@ -51,7 +51,7 @@ def run() -> None:
             dest = Path(tmp) / f"src-{i}"
             sd = sources.fetch(src, dest)
 
-            if mode != "full" and sd.revision == prior.get(name):
+            if mode != "full" and sd.revision == _prior_revision(prior, name):
                 log(f"source '{name}' content unchanged after fetch; skipping embed")
                 source_results.append({"name": name, "revision": sd.revision, "chunks": _carry_chunks(prior, name)})
                 continue
@@ -75,9 +75,17 @@ def run() -> None:
     log(f"done: {total} chunks in store")
 
 
+def _prior_revision(prior: dict, name: str) -> str:
+    status = prior.get(name, {})
+    if isinstance(status, dict):
+        return status.get("revision", "")
+    return status or ""
+
+
 def _carry_chunks(prior: dict, name: str) -> int:
-    # Revision-only prior doesn't carry chunk counts; report 0 so the operator
-    # relies on the store total. (Total is authoritative in status.indexedChunks.)
+    status = prior.get(name, {})
+    if isinstance(status, dict):
+        return int(status.get("chunks", 0) or 0)
     return 0
 
 

@@ -11,8 +11,9 @@ from __future__ import annotations
 import os
 
 from contextlib import asynccontextmanager
+from typing import Literal
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from rag_worker.embeddings import from_spec
 from rag_worker.stores import make_store
@@ -153,21 +154,21 @@ def rrf(vector_hits: list[dict], text_hits: list[dict], k: int = 60) -> list[dic
 
 
 class Message(BaseModel):
-    role: str
-    content: str
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
 
 
 class QueryRequest(BaseModel):
-    query: str
-    topK: int | None = None
-    source: str | None = None
+    query: str = Field(min_length=1)
+    topK: int | None = Field(default=None, ge=1, le=100)
+    source: str | None = Field(default=None, min_length=1)
     history: list[Message] | None = None
-    docPath: str | None = None
-    docPathPrefix: str | None = None
+    docPath: str | None = Field(default=None, min_length=1)
+    docPathPrefix: str | None = Field(default=None, min_length=1)
     hybrid: bool | None = False
-    temperature: float | None = None
-    systemPrompt: str | None = None
-    maxTokens: int | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    systemPrompt: str | None = Field(default=None, min_length=1)
+    maxTokens: int | None = Field(default=None, ge=1, le=8192)
 
 
 class Chunk(BaseModel):

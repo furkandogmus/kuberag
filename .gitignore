@@ -1,4 +1,5 @@
 bin/
+.venv-test/
 *.test
 *.out
 cover.out
