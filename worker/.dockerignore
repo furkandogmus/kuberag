@@ -1,0 +1,6 @@
+# Worker / retriever image context ("worker/") — exclude tests and caches.
+tests/
+**/__pycache__/
+**/*.pyc
+.DS_Store
+*.md

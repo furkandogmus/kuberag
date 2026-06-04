@@ -1,0 +1,13 @@
+# Operator image build context (".") only needs Go sources + modules.
+.git
+.github
+bin/
+hack/
+worker/
+config/
+*.md
+*.log
+LICENSE
+**/__pycache__/
+**/*.pyc
+.DS_Store
