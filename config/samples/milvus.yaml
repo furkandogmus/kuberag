@@ -1,0 +1,123 @@
+# Minimal Milvus standalone (etcd + MinIO + milvus) for local testing. Not for production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-milvus
+  labels: { app: etcd-milvus }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: etcd-milvus } }
+  template:
+    metadata: { labels: { app: etcd-milvus } }
+    spec:
+      containers:
+        - name: etcd
+          image: quay.io/coreos/etcd:v3.5.16
+          command: ["etcd"]
+          args:
+            - "-advertise-client-urls=http://127.0.0.1:2379"
+            - "-listen-client-urls=http://0.0.0.0:2379"
+            - "--data-dir=/etcd"
+          ports: [{ containerPort: 2379 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: etcd-milvus }
+spec:
+  selector: { app: etcd-milvus }
+  ports: [{ port: 2379, targetPort: 2379 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio-milvus
+  labels: { app: minio-milvus }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio-milvus } }
+  template:
+    metadata: { labels: { app: minio-milvus } }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+          args: ["server", "/data"]
+          env:
+            - { name: MINIO_ACCESS_KEY, value: minioadmin }
+            - { name: MINIO_SECRET_KEY, value: minioadmin }
+          ports: [{ containerPort: 9000 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: minio-milvus }
+spec:
+  selector: { app: minio-milvus }
+  ports: [{ port: 9000, targetPort: 9000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: milvus
+  labels: { app: milvus }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: milvus } }
+  template:
+    metadata: { labels: { app: milvus } }
+    spec:
+      containers:
+        - name: milvus
+          image: milvusdb/milvus:v2.4.15
+          command: ["milvus", "run", "standalone"]
+          env:
+            - { name: ETCD_ENDPOINTS, value: "etcd-milvus:2379" }
+            - { name: MINIO_ADDRESS, value: "minio-milvus:9000" }
+            - { name: COMMON_STORAGETYPE, value: "minio" }
+          ports:
+            - { containerPort: 19530, name: grpc }
+            - { containerPort: 9091, name: health }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9091 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata: { name: milvus }
+spec:
+  selector: { app: milvus }
+  ports:
+    - { name: grpc, port: 19530, targetPort: 19530 }
+    - { name: health, port: 9091, targetPort: 9091 }
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: milvus-docs
+  namespace: default
+spec:
+  sources:
+    - name: site
+      type: web
+      web:
+        urls: ["https://httpbin.org/html"]
+        maxDepth: 0
+        maxPages: 3
+  chunking: { strategy: fixed, maxTokens: 300, overlap: 20 }
+  embedding: { model: bge-small, provider: local }
+  vectorStore:
+    type: milvus
+    endpoint: "http://milvus.default.svc.cluster.local:19530"
+    collection: milvus_docs
+    distance: cosine
+  ingestion: { mode: full }
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: milvus-docs
+  namespace: default
+spec:
+  knowledgeBaseRef: { name: milvus-docs }
+  topK: 3
+  replicas: 1

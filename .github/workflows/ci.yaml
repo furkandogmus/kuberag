@@ -23,9 +23,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      # Build golangci-lint from source with the repo's Go toolchain. Prebuilt
+      # releases lag new Go versions and refuse a higher `go` directive, so
+      # `go run` (compiled with the same toolchain) is the reliable path.
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
   go:
     name: go (build, unit + integration)
