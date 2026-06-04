@@ -368,6 +368,11 @@ type KnowledgeBaseStatus struct {
 	// AutoTuneAttempts counts auto-tune iterations applied so far.
 	// +optional
 	AutoTuneAttempts int `json:"autoTuneAttempts,omitempty"`
+	// PendingRetune marks that auto-tune has changed the effective chunking and a
+	// re-index is owed, without disturbing ObservedSpecHash (which keeps tracking
+	// the last ingested spec so user spec edits are still detected mid-tune).
+	// +optional
+	PendingRetune bool `json:"pendingRetune,omitempty"`
 	// BestRecallPercent is the highest recall observed across auto-tune attempts.
 	// +optional
 	BestRecallPercent int `json:"bestRecallPercent,omitempty"`

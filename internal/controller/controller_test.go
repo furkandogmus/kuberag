@@ -80,7 +80,7 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 	}
 
 	// An auto-tuned override (status) must NOT change the hash — auto-tune
-	// forces re-ingest by clearing ObservedSpecHash, not via the hash.
+	// forces re-ingest via PendingRetune, not via the hash.
 	kb3 := baseKB()
 	tuned := specChunking(kb3)
 	tuned.Overlap += 40
@@ -179,8 +179,44 @@ func TestApplyAutoTune(t *testing.T) {
 	if kb.Status.AutoTuneAttempts != 1 {
 		t.Fatalf("expected attempts=1, got %d", kb.Status.AutoTuneAttempts)
 	}
-	if kb.Status.ObservedSpecHash != "" {
-		t.Fatal("auto-tune must clear ObservedSpecHash to force re-index")
+	if !kb.Status.PendingRetune {
+		t.Fatal("auto-tune must set PendingRetune to force re-index")
+	}
+	// ObservedSpecHash must be left intact so a user spec edit is still detected
+	// while the tuned re-index is pending.
+	if kb.Status.ObservedSpecHash != "abc" {
+		t.Fatalf("auto-tune must not disturb ObservedSpecHash, got %q", kb.Status.ObservedSpecHash)
+	}
+}
+
+func TestUserEditedSpec(t *testing.T) {
+	tuned := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 600, Overlap: 120}
+
+	// No override active -> never a drop, whatever the hash.
+	kb := baseKB()
+	kb.Status.ObservedSpecHash = "h1"
+	if userEditedSpec(kb, "h2") {
+		t.Fatal("no override should never be dropped")
+	}
+
+	// Override active, hash unchanged -> keep (this is the steady tuning case).
+	kb.Status.EffectiveChunking = &tuned
+	kb.Status.PendingRetune = true // mid-tune: re-index pending
+	if userEditedSpec(kb, "h1") {
+		t.Fatal("unedited spec must keep the override even mid-tune")
+	}
+
+	// Override active and the user edited the spec (hash drift) -> drop, even while
+	// a tuned re-index is still pending. This is the regression guard: ObservedSpecHash
+	// is no longer cleared by auto-tune, so the edit is detected instead of masked.
+	if !userEditedSpec(kb, "h2") {
+		t.Fatal("a spec edit during a pending retune must drop the override")
+	}
+
+	// Never-ingested KB (empty hash) with no override -> not a drop.
+	fresh := baseKB()
+	if userEditedSpec(fresh, "h2") {
+		t.Fatal("never-ingested KB should not report a spec edit")
 	}
 }
 
@@ -271,8 +307,12 @@ func TestSettleOnBest(t *testing.T) {
 	if *kb.Status.EffectiveChunking != best {
 		t.Fatalf("effective chunking should be reverted to best: %+v", kb.Status.EffectiveChunking)
 	}
-	if kb.Status.ObservedSpecHash != "" || kb.Status.Evaluation != nil {
-		t.Fatal("settleOnBest must clear spec hash and evaluation to force re-index + re-eval")
+	if !kb.Status.PendingRetune || kb.Status.Evaluation != nil {
+		t.Fatal("settleOnBest must mark PendingRetune and clear evaluation to force re-index + re-eval")
+	}
+	// ObservedSpecHash stays intact so a concurrent spec edit is still detectable.
+	if kb.Status.ObservedSpecHash != "abc" {
+		t.Fatalf("settleOnBest must not disturb ObservedSpecHash, got %q", kb.Status.ObservedSpecHash)
 	}
 
 	// Already on best -> no-op (this is how the settle loop terminates).

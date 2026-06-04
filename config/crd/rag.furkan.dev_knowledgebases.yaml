@@ -1537,6 +1537,12 @@ spec:
                 description: ObservedSpecHash fingerprints the re-ingest-relevant
                   spec fields.
                 type: string
+              pendingRetune:
+                description: |-
+                  PendingRetune marks that auto-tune has changed the effective chunking and a
+                  re-index is owed, without disturbing ObservedSpecHash (which keeps tracking
+                  the last ingested spec so user spec edits are still detected mid-tune).
+                type: boolean
               phase:
                 description: KnowledgeBasePhase is a coarse, human-readable lifecycle
                   state.

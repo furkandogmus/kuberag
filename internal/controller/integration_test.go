@@ -17,6 +17,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -451,6 +452,74 @@ func TestKnowledgeBaseAutoTuneRevertsToBest(t *testing.T) {
 		ec := got.Status.EffectiveChunking
 		if ec == nil || ec.Strategy != ragv1alpha1.ChunkSemantic || ec.MaxTokens != 800 || ec.Overlap != 80 {
 			return fmt.Errorf("did not revert to best (default) chunking: %+v", ec)
+		}
+		return nil
+	})
+}
+
+// TestKnowledgeBaseEvalEmptyDataset verifies that an evaluation over an empty
+// dataset (queries=0) does not trip the recall gate: no auto-tune, no Degraded,
+// just a NoDataset condition. Otherwise a meaningless recall 0% would churn the
+// auto-tune loop pointlessly.
+func TestKnowledgeBaseEvalEmptyDataset(t *testing.T) {
+	ns := newNamespace(t)
+	on := true
+	kb := sampleKB(ns, "nodata")
+	kb.Spec.RetrievalQuality = &ragv1alpha1.RetrievalQualitySpec{
+		Enabled:              &on,
+		DatasetRef:           ragv1alpha1.LocalObjectRef{Name: "eval-ds"},
+		MinimumRecallPercent: 90,
+		AutoTune:             &ragv1alpha1.AutoTuneSpec{Enabled: &on, MaxAttempts: 3},
+	}
+	if err := k8sClient.Create(testCtx, kb); err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	waitActiveJob := func(jobType string) string {
+		var name string
+		eventually(t, 20*time.Second, func() error {
+			var got ragv1alpha1.KnowledgeBase
+			if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+				return err
+			}
+			if got.Status.ActiveJob == "" {
+				return fmt.Errorf("no active job yet (phase=%s)", got.Status.Phase)
+			}
+			var job batchv1.Job
+			if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: got.Status.ActiveJob}, &job); err != nil {
+				return err
+			}
+			if job.Labels[labelJobType] != jobType {
+				return fmt.Errorf("active job type=%s, want %s", job.Labels[labelJobType], jobType)
+			}
+			name = got.Status.ActiveJob
+			return nil
+		})
+		return name
+	}
+
+	completeJob(t, ns, waitActiveJob(jobTypeIngest), `{"totalChunks":8,"sources":[{"name":"docs","revision":"r0","chunks":8}]}`)
+	// Evaluation comes back empty: recall 0 over 0 queries.
+	completeJob(t, ns, waitActiveJob(jobTypeEval), `{"recallPercent":0,"queries":0}`)
+
+	eventually(t, 20*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.ActiveJob != "" {
+			return fmt.Errorf("still has active job %q", got.Status.ActiveJob)
+		}
+		// Must NOT have auto-tuned or degraded on an empty dataset.
+		if got.Status.AutoTuneAttempts != 0 {
+			return fmt.Errorf("auto-tune fired on empty dataset: attempts=%d", got.Status.AutoTuneAttempts)
+		}
+		if got.Status.Phase == ragv1alpha1.PhaseDegraded {
+			return fmt.Errorf("phase Degraded on empty dataset")
+		}
+		cond := meta.FindStatusCondition(got.Status.Conditions, ragv1alpha1.ConditionEvaluated)
+		if cond == nil || cond.Reason != "NoDataset" {
+			return fmt.Errorf("Evaluated condition reason=%v, want NoDataset", cond)
 		}
 		return nil
 	})

@@ -91,12 +91,15 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	hash := specHash(&kb, secretsHash)
 	// If the user edited the spec while an auto-tuned chunking override is active,
 	// drop the override so the new ingestion honours the spec (otherwise the
-	// stored EffectiveChunking would mask the spec change).
-	if kb.Status.ObservedSpecHash != "" && kb.Status.ObservedSpecHash != hash && kb.Status.EffectiveChunking != nil {
+	// stored EffectiveChunking would mask the spec change). This works even mid-
+	// tune because ObservedSpecHash keeps tracking the last ingested spec (the
+	// forced re-index is driven by PendingRetune, not by clearing the hash).
+	if userEditedSpec(&kb, hash) {
 		kb.Status.EffectiveChunking = nil
 		kb.Status.AutoTuneAttempts = 0
 		kb.Status.BestChunking = nil
 		kb.Status.BestRecallPercent = 0
+		kb.Status.PendingRetune = false
 	}
 	eff := effectiveChunking(&kb)
 
@@ -185,6 +188,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	kb.Status.ObservedSpecHash = hash
 	kb.Status.ObservedEmbeddingModel = kb.Spec.Embedding.Model
 	kb.Status.EffectiveChunking = &eff
+	kb.Status.PendingRetune = false // re-index satisfied
 	kb.Status.IndexedChunks = result.TotalChunks
 	kb.Status.Sources = toSourceStatus(result.Sources)
 	now := metav1.Now()
@@ -231,6 +235,17 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	}
 	retrievalRecall.WithLabelValues(kb.Name).Set(float64(result.RecallPercent))
 
+	// No queries means the dataset is empty/missing: recall 0% is meaningless, so
+	// don't gate, auto-tune, or degrade on it. Evaluation is still recorded (with a
+	// timestamp) so this doesn't busy-loop re-evaluating.
+	if result.Queries == 0 {
+		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "NoDataset",
+			"evaluation dataset empty; recall gate skipped — add queries to the dataset ConfigMap")
+		r.event(kb, corev1.EventTypeWarning, "EvalNoDataset",
+			"evaluation dataset empty; skipping recall gate and auto-tune")
+		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+	}
+
 	rq := kb.Spec.RetrievalQuality
 	target := rq.MinimumRecallPercent
 	below := target > 0 && result.RecallPercent < target
@@ -267,7 +282,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			r.event(kb, corev1.EventTypeNormal, "AutoTuning",
 				"recall %d%% below target %d%%, re-indexing with tuned chunking (attempt %d/%d)",
 				result.RecallPercent, target, kb.Status.AutoTuneAttempts, autoTuneMax(rq))
-			// Re-index will be triggered next pass because ObservedSpecHash was cleared.
+			// Re-index will be triggered next pass because PendingRetune was set.
 			return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
 		}
 
@@ -460,7 +475,7 @@ func effectiveChunking(kb *ragv1alpha1.KnowledgeBase) ragv1alpha1.ChunkingSpec {
 
 // specHash fingerprints the user's intent (spec) so edits trigger re-ingestion.
 // It deliberately hashes spec chunking, not the effective (possibly auto-tuned)
-// chunking — auto-tune forces its own re-ingest by clearing ObservedSpecHash.
+// chunking — auto-tune forces its own re-ingest via PendingRetune instead.
 func specHash(kb *ragv1alpha1.KnowledgeBase, secretsHash string) string {
 	material := struct {
 		Sources     []ragv1alpha1.Source
@@ -491,8 +506,22 @@ func chunkFingerprint(c ragv1alpha1.ChunkingSpec) string {
 	return hex.EncodeToString(sum[:3])
 }
 
+// userEditedSpec reports whether the user changed the spec (hash drift) while an
+// auto-tuned chunking override is active, so the override must be discarded. It
+// holds mid-tune too: ObservedSpecHash always tracks the last ingested spec (the
+// forced re-index uses PendingRetune, not a cleared hash), so an edit during the
+// re-index window is still detected instead of being masked by the override.
+func userEditedSpec(kb *ragv1alpha1.KnowledgeBase, desiredHash string) bool {
+	return kb.Status.EffectiveChunking != nil &&
+		kb.Status.ObservedSpecHash != "" &&
+		kb.Status.ObservedSpecHash != desiredHash
+}
+
 // needsIngest decides whether the store is stale relative to the spec.
 func needsIngest(kb *ragv1alpha1.KnowledgeBase, desiredHash string) (reason string, need bool) {
+	if kb.Status.PendingRetune {
+		return "auto-tune re-index", true
+	}
 	if kb.Status.ObservedSpecHash == "" {
 		return "initial ingestion", true
 	}
@@ -596,12 +625,12 @@ func rotateStrategy(s ragv1alpha1.ChunkingStrategy) ragv1alpha1.ChunkingStrategy
 }
 
 // applyAutoTune steps the effective chunking along the ladder and forces a
-// re-index by clearing the observed spec hash.
+// re-index by marking PendingRetune.
 func applyAutoTune(kb *ragv1alpha1.KnowledgeBase) {
 	eff := nextChunking(effectiveChunking(kb))
 	kb.Status.EffectiveChunking = &eff
 	kb.Status.AutoTuneAttempts++
-	kb.Status.ObservedSpecHash = "" // forces re-ingest on next pass
+	kb.Status.PendingRetune = true // owes a re-ingest on the next pass
 	// Clear the last evaluation so a re-eval runs after the tuned re-index even
 	// when no evalSchedule is set; this lets auto-tune iterate up to maxAttempts.
 	kb.Status.Evaluation = nil
@@ -629,8 +658,8 @@ func settleOnBest(kb *ragv1alpha1.KnowledgeBase) bool {
 	}
 	best := *kb.Status.BestChunking
 	kb.Status.EffectiveChunking = &best
-	kb.Status.ObservedSpecHash = "" // forces re-ingest on next pass
-	kb.Status.Evaluation = nil      // forces a re-eval after the re-index
+	kb.Status.PendingRetune = true // owes a re-ingest on the next pass
+	kb.Status.Evaluation = nil     // forces a re-eval after the re-index
 	return true
 }
 

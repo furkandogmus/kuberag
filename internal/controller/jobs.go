@@ -228,8 +228,8 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1
 		return nil, err
 	}
 	// The spec hash is stable across auto-tune (which tunes *effective* chunking
-	// and forces re-ingest by clearing ObservedSpecHash, not by changing the
-	// hash). Disambiguate by the auto-tune attempt AND the effective chunking so
+	// and forces re-ingest via PendingRetune, not by changing the spec hash).
+	// Disambiguate by the auto-tune attempt AND the effective chunking so
 	// an immediate re-index gets its own Job instead of colliding with the
 	// previous, still-present completed Job (whose result ConfigMap is already
 	// gone) before its TTL expires. The attempt+chunk fingerprint lead the name so
