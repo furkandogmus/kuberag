@@ -10,7 +10,29 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-TEXT_EXTS = {".md", ".mdx", ".txt", ".rst", ".html", ".htm"}
+TEXT_EXTS = {".md", ".mdx", ".txt", ".rst", ".html", ".htm", ".pdf"}
+
+
+def _read_pdf(path: Path) -> str:
+    from pypdf import PdfReader
+    try:
+        reader = PdfReader(path)
+        return "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+    except Exception as e:
+        print(f"Error parsing PDF file {path}: {e}")
+        return ""
+
+
+def _read_pdf_bytes(body: bytes) -> str:
+    import io
+    from pypdf import PdfReader
+    try:
+        reader = PdfReader(io.BytesIO(body))
+        return "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+    except Exception as e:
+        print(f"Error parsing PDF bytes: {e}")
+        return ""
+
 
 
 @dataclass
@@ -131,7 +153,10 @@ def fetch_github(src: dict, dest: Path) -> SourceDocs:
         rel = str(p.relative_to(dest))
         if not _match_globs(rel, globs):
             continue
-        text = p.read_text(encoding="utf-8", errors="ignore")
+        if p.suffix.lower() == ".pdf":
+            text = _read_pdf(p)
+        else:
+            text = p.read_text(encoding="utf-8", errors="ignore")
         docs.append((f"{gh['repo']}/{rel}", text))
     return SourceDocs(revision=sha, docs=docs)
 
@@ -191,7 +216,10 @@ def fetch_s3(src: dict, dest: Path) -> SourceDocs:
     docs: list[tuple[str, str]] = []
     for key, _, _ in objs:
         body = client.get_object(Bucket=s3["bucket"], Key=key)["Body"].read()
-        text = body.decode("utf-8", errors="ignore")
+        if key.lower().endswith(".pdf"):
+            text = _read_pdf_bytes(body)
+        else:
+            text = body.decode("utf-8", errors="ignore")
         docs.append((f"s3://{s3['bucket']}/{key}", text))
     return SourceDocs(revision=_hash(*[f"{k}:{e}:{s}" for k, e, s in objs]), docs=docs)
 
