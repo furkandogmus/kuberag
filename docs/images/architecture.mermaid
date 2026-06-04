@@ -1,0 +1,62 @@
+graph TD
+    %% Custom Styles & Classes
+    classDef control fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef data fill:#0f172a,stroke:#34d399,stroke-width:2px,color:#f8fafc;
+    classDef external fill:#1e1b4b,stroke:#818cf8,stroke-width:1px,color:#e0e7ff;
+    classDef resources fill:#0f172a,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+
+    subgraph K8S [Kubernetes Cluster]
+        subgraph CP [Control Plane - Go Operator]
+            KB[KnowledgeBase CRD]:::resources
+            RTR[Retriever CRD]:::resources
+            VI[VectorIndex CRD]:::resources
+
+            KBC[KnowledgeBase Controller]:::control
+            RTRC[Retriever Controller]:::control
+            VIC[VectorIndex Controller]:::control
+
+            KB -.->|Watched by| KBC
+            RTR -.->|Watched by| RTRC
+            VI -.->|Watched by| VIC
+
+            KBC -->|Creates & Reconciles| VI
+            KBC -->|Spawns| IngestJob[Ingestion / Eval Job]:::control
+            RTRC -->|Deploys & Exposes| FastAPI[Retriever FastAPI Pod]:::control
+        end
+
+        subgraph DP [Data Plane - Python Worker]
+            IngestJob -->|Runs| Worker[rag_worker]:::data
+            Worker -->|Read Results| ResCM[Result ConfigMap]:::data
+            ResCM -->|Update Status| KBC
+        end
+    end
+
+    %% External Connections
+    subgraph ExtSources [Data Sources]
+        Git[(Git Repo)]:::external
+        S3[(S3 Bucket)]:::external
+        Web[(Web Crawl)]:::external
+    end
+
+    subgraph ExtStores [Vector Stores]
+        Qdrant[(Qdrant)]:::external
+        PgVector[(pgvector)]:::external
+        Milvus[(Milvus)]:::external
+    end
+
+    subgraph ExtAPIs [AI / LLM APIs]
+        EmbedAPI[Embeddings: FastEmbed / OpenAI / Gemini / Ollama]:::external
+        GenAPI[Generation: Ollama / OpenAI / Gemini]:::external
+    end
+
+    %% Data Plane Actions
+    Worker -->|1. Pull| ExtSources
+    Worker -->|2. Chunk & Embed| EmbedAPI
+    Worker -->|3. Upsert| ExtStores
+
+    %% Serving/Query Path
+    User([User Client]) -->|/query| FastAPI
+    FastAPI -->|1. Hybrid Vector + Lexical Search| ExtStores
+    FastAPI -->|2. Reciprocal Rank Fusion RRF| FastAPI
+    FastAPI -->|3. Ground Answer| GenAPI
+    GenAPI -->|4. Return Response| User

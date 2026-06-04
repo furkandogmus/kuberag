@@ -68,7 +68,7 @@ loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
 
 ## Architecture
 
-![kuberag Architecture](docs/images/architecture.png)
+![kuberag Architecture](docs/images/architecture.svg)
 
 Two planes, intentionally separated:
 
@@ -77,14 +77,6 @@ Two planes, intentionally separated:
 | **Control** | Decides *when* to ingest/evaluate/tune, manages Job + Deployment lifecycle, reports status, emits events & metrics | Go + controller-runtime |
 | **Data** | Does the work: clone/list/crawl → chunk → embed → upsert; evaluate; serve | Python (`worker/`) |
 
-```
-KnowledgeBase ──watch──▶ Reconciler ──creates──▶ Job (ingest|eval|cleanup)
-      ▲                      │  │                      │
-      │                      │  └─creates─▶ VectorIndex │  result ConfigMap
-      └──── status ◀─────────┘                          ▼
-                                          sources → chunk → embed → vector store
-Retriever ──watch──▶ Reconciler ──creates──▶ Deployment + Service (FastAPI /query)
-```
 
 The KnowledgeBase reconciler:
 
