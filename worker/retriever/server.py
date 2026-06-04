@@ -96,20 +96,60 @@ def _ensure() -> None:
         _gen_client = OpenAI(base_url=base_url, api_key=os.environ.get("GEN_API_KEY") or "no-key")
 
 
-def _generate(question: str, chunks: list[Chunk], history: list[Message] | None = None) -> str:
+def _generate(
+    question: str,
+    chunks: list[Chunk],
+    history: list[Message] | None = None,
+    temperature: float | None = None,
+    system_prompt: str | None = None,
+    max_tokens: int | None = None,
+) -> str:
     context = "\n\n".join(f"[{c.docPath}]\n{c.text}" for c in chunks)
-    system = os.environ.get("GEN_SYSTEM_PROMPT") or _DEFAULT_SYSTEM_PROMPT
+    system = system_prompt or os.environ.get("GEN_SYSTEM_PROMPT") or _DEFAULT_SYSTEM_PROMPT
     messages = [{"role": "system", "content": system}]
     if history:
         for msg in history:
             messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"})
-    resp = _gen_client.chat.completions.create(
-        model=os.environ["GEN_MODEL"],
-        max_tokens=int(os.environ.get("GEN_MAX_TOKENS", "512")),
-        messages=messages,
-    )
+    
+    kwargs = {
+        "model": os.environ["GEN_MODEL"],
+        "max_tokens": max_tokens or int(os.environ.get("GEN_MAX_TOKENS", "512")),
+        "messages": messages,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    resp = _gen_client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""
+
+
+def rrf(vector_hits: list[dict], text_hits: list[dict], k: int = 60) -> list[dict]:
+    scores = {}
+    payloads = {}
+    
+    def make_key(h):
+        p = h["payload"]
+        return (p.get("source", ""), p.get("doc_path", ""), p.get("text", ""))
+    
+    for rank, h in enumerate(vector_hits):
+        key = make_key(h)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        payloads[key] = h["payload"]
+        
+    for rank, h in enumerate(text_hits):
+        key = make_key(h)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        payloads[key] = h["payload"]
+        
+    fused = []
+    for key, score in scores.items():
+        fused.append({
+            "score": score,
+            "payload": payloads[key]
+        })
+    fused.sort(key=lambda x: x["score"], reverse=True)
+    return fused
 
 
 class Message(BaseModel):
@@ -122,6 +162,12 @@ class QueryRequest(BaseModel):
     topK: int | None = None
     source: str | None = None
     history: list[Message] | None = None
+    docPath: str | None = None
+    docPathPrefix: str | None = None
+    hybrid: bool | None = False
+    temperature: float | None = None
+    systemPrompt: str | None = None
+    maxTokens: int | None = None
 
 
 class Chunk(BaseModel):
@@ -146,10 +192,22 @@ def healthz() -> dict:
 def query(req: QueryRequest) -> QueryResponse:
     _ensure()
     topk = req.topK or _DEFAULT_TOPK
-    # Over-fetch when reranking so the cross-encoder has candidates to reorder.
-    fetch_k = topk * 4 if _RERANK else topk
-    qv = _embedder.embed_query(req.query)
-    hits = _store.search(qv, fetch_k, source=req.source)
+    fetch_k = topk * 4 if _RERANK else (max(topk * 3, 20) if req.hybrid else topk)
+    
+    if req.hybrid:
+        qv = _embedder.embed_query(req.query)
+        vector_hits = _store.search(
+            qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
+        )
+        text_hits = _store.search_text(
+            req.query, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
+        )
+        hits = rrf(vector_hits, text_hits)
+    else:
+        qv = _embedder.embed_query(req.query)
+        hits = _store.search(
+            qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
+        )
 
     if _RERANK and hits:
         scores = list(_reranker.rerank(req.query, [h["payload"].get("text", "") for h in hits]))
@@ -159,7 +217,8 @@ def query(req: QueryRequest) -> QueryResponse:
 
     results = []
     for h in hits[:topk]:
-        if h["score"] < _SCORE_THRESHOLD:
+        is_rrf_score = req.hybrid and not _RERANK
+        if not is_rrf_score and h["score"] < _SCORE_THRESHOLD:
             continue
         p = h["payload"]
         results.append(Chunk(
@@ -172,7 +231,14 @@ def query(req: QueryRequest) -> QueryResponse:
     answer = None
     if _GEN_ENABLED and results:
         try:
-            answer = _generate(req.query, results, req.history)
+            answer = _generate(
+                req.query,
+                results,
+                req.history,
+                temperature=req.temperature,
+                system_prompt=req.systemPrompt,
+                max_tokens=req.maxTokens,
+            )
         except Exception as e:
             # Generation is best-effort: never fail retrieval because the LLM
             # call errored (quota, timeout, bad model). Surface the reason.

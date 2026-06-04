@@ -26,7 +26,24 @@ class VectorStore(ABC):
     def count(self) -> int: ...
 
     @abstractmethod
-    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]: ...
+    def search(
+        self,
+        vector: list[float],
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]: ...
+
+    @abstractmethod
+    def search_text(
+        self,
+        query: str,
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]: ...
 
     @abstractmethod
     def drop(self) -> None: ...
@@ -124,14 +141,34 @@ class QdrantStore(VectorStore):
     def count(self) -> int:
         return self.client.count(self.collection, exact=True).count
 
-    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]:
+    def _build_filter(
+        self,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ):
         from qdrant_client import models
+        import re
 
-        query_filter = None
+        must = []
         if source is not None:
-            query_filter = models.Filter(must=[
-                models.FieldCondition(key="source", match=models.MatchValue(value=source))
-            ])
+            must.append(models.FieldCondition(key="source", match=models.MatchValue(value=source)))
+        if doc_path is not None:
+            must.append(models.FieldCondition(key="doc_path", match=models.MatchValue(value=doc_path)))
+        if doc_path_prefix is not None:
+            must.append(models.FieldCondition(key="doc_path", match=models.MatchRegex(regex="^" + re.escape(doc_path_prefix))))
+        
+        return models.Filter(must=must) if must else None
+
+    def search(
+        self,
+        vector: list[float],
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]:
+        query_filter = self._build_filter(source, doc_path, doc_path_prefix)
         hits = self.client.search(
             self.collection,
             query_vector=vector,
@@ -140,6 +177,36 @@ class QdrantStore(VectorStore):
             with_payload=True,
         )
         return [{"score": h.score, "payload": h.payload} for h in hits]
+
+    def search_text(
+        self,
+        query: str,
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]:
+        from qdrant_client import models
+        import re
+
+        must = []
+        if source is not None:
+            must.append(models.FieldCondition(key="source", match=models.MatchValue(value=source)))
+        if doc_path is not None:
+            must.append(models.FieldCondition(key="doc_path", match=models.MatchValue(value=doc_path)))
+        if doc_path_prefix is not None:
+            must.append(models.FieldCondition(key="doc_path", match=models.MatchRegex(regex="^" + re.escape(doc_path_prefix))))
+        
+        must.append(models.FieldCondition(key="text", match=models.MatchText(text=query)))
+
+        scroll_filter = models.Filter(must=must)
+        res, _ = self.client.scroll(
+            collection_name=self.collection,
+            scroll_filter=scroll_filter,
+            limit=topk,
+            with_payload=True,
+        )
+        return [{"score": 1.0, "payload": r.payload} for r in res]
 
     def drop(self) -> None:
         if self._exists():
@@ -208,24 +275,73 @@ class PgVectorStore(VectorStore):
     def count(self) -> int:
         return self.conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0]
 
-    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]:
+    def _build_where(
+        self,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+        text_query: str | None = None,
+    ) -> tuple[str, list]:
+        clauses = []
+        params = []
+        if source is not None:
+            clauses.append("source = %s")
+            params.append(source)
+        if doc_path is not None:
+            clauses.append("doc_path = %s")
+            params.append(doc_path)
+        if doc_path_prefix is not None:
+            clauses.append("doc_path LIKE %s")
+            params.append(doc_path_prefix + "%")
+        if text_query is not None:
+            clauses.append("text ILIKE %s")
+            params.append("%" + text_query + "%")
+        
+        where_clause = ""
+        if clauses:
+            where_clause = "WHERE " + " AND ".join(clauses)
+        return where_clause, params
+
+    def search(
+        self,
+        vector: list[float],
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]:
         op = self._ORDER[self.distance]
         vec = "[" + ",".join(map(str, vector)) + "]"
-        if source is not None:
-            rows = self.conn.execute(
-                f"SELECT source, doc_path, text, embedding {op} %s AS dist "
-                f"FROM {self.table} WHERE source = %s ORDER BY dist ASC LIMIT %s",
-                (vec, source, topk),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                f"SELECT source, doc_path, text, embedding {op} %s AS dist "
-                f"FROM {self.table} ORDER BY dist ASC LIMIT %s",
-                (vec, topk),
-            ).fetchall()
+        where_clause, params = self._build_where(source, doc_path, doc_path_prefix)
+        query_params = [vec] + params + [topk]
+        rows = self.conn.execute(
+            f"SELECT source, doc_path, text, embedding {op} %s AS dist "
+            f"FROM {self.table} {where_clause} ORDER BY dist ASC LIMIT %s",
+            query_params,
+        ).fetchall()
         out = []
-        for src, doc_path, text, dist in rows:
-            out.append({"score": 1.0 - float(dist), "payload": {"source": src, "doc_path": doc_path, "text": text}})
+        for src, doc_path_val, text, dist in rows:
+            out.append({"score": 1.0 - float(dist), "payload": {"source": src, "doc_path": doc_path_val, "text": text}})
+        return out
+
+    def search_text(
+        self,
+        query: str,
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]:
+        where_clause, params = self._build_where(source, doc_path, doc_path_prefix, text_query=query)
+        query_params = params + [topk]
+        rows = self.conn.execute(
+            f"SELECT source, doc_path, text "
+            f"FROM {self.table} {where_clause} LIMIT %s",
+            query_params,
+        ).fetchall()
+        out = []
+        for src, doc_path_val, text in rows:
+            out.append({"score": 1.0, "payload": {"source": src, "doc_path": doc_path_val, "text": text}})
         return out
 
     def drop(self) -> None:
@@ -298,14 +414,57 @@ class MilvusStore(VectorStore):
             time.sleep(1)
         return n
 
-    def search(self, vector: list[float], topk: int, source: str | None = None) -> list[dict]:
-        expr = f'source == "{source}"' if source is not None else None
+    def _build_expr(
+        self,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+        text_query: str | None = None,
+    ) -> str | None:
+        exprs = []
+        if source is not None:
+            exprs.append(f'source == "{source}"')
+        if doc_path is not None:
+            exprs.append(f'doc_path == "{doc_path}"')
+        if doc_path_prefix is not None:
+            exprs.append(f'doc_path like "{doc_path_prefix}%"')
+        if text_query is not None:
+            exprs.append(f'text like "%{text_query}%"')
+        
+        return " and ".join(exprs) if exprs else None
+
+    def search(
+        self,
+        vector: list[float],
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]:
+        expr = self._build_expr(source, doc_path, doc_path_prefix)
         res = self.client.search(
             self.collection, data=[vector], limit=topk,
             filter=expr,
             output_fields=["source", "doc_path", "text"],
         )[0]
         return [{"score": h["distance"], "payload": h["entity"]} for h in res]
+
+    def search_text(
+        self,
+        query: str,
+        topk: int,
+        source: str | None = None,
+        doc_path: str | None = None,
+        doc_path_prefix: str | None = None,
+    ) -> list[dict]:
+        expr = self._build_expr(source, doc_path, doc_path_prefix, text_query=query)
+        res = self.client.query(
+            self.collection,
+            filter=expr,
+            limit=topk,
+            output_fields=["source", "doc_path", "text"],
+        )
+        return [{"score": 1.0, "payload": h} for h in res]
 
     def drop(self) -> None:
         if self.client.has_collection(self.collection):
