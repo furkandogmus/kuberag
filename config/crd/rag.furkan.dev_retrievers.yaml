@@ -1020,7 +1020,7 @@ spec:
                 x-kubernetes-validations:
                 - message: baseURL is required when provider is openai-compatible
                   rule: self.provider != 'openai-compatible' || (has(self.baseURL)
-                    && self.baseURL != '')
+                    && size(self.baseURL) > 0)
               image:
                 description: Image overrides the retriever server image.
                 type: string

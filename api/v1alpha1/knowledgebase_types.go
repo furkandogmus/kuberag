@@ -125,7 +125,7 @@ type ChunkingSpec struct {
 }
 
 // EmbeddingSpec selects the embedding model. Changing Model triggers a full re-embed.
-// +kubebuilder:validation:XValidation:rule="self.provider != 'openai-compatible' || (has(self.baseURL) && self.baseURL != '')",message="baseURL is required when provider is openai-compatible"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)",message="baseURL is required when provider is openai-compatible"
 type EmbeddingSpec struct {
 	// Model name, e.g. "bge-small", "bge-large", "text-embedding-3-small".
 	// +kubebuilder:default=bge-small

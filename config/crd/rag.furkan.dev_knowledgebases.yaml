@@ -135,7 +135,7 @@ spec:
                 x-kubernetes-validations:
                 - message: baseURL is required when provider is openai-compatible
                   rule: self.provider != 'openai-compatible' || (has(self.baseURL)
-                    && self.baseURL != '')
+                    && size(self.baseURL) > 0)
               freshness:
                 description: FreshnessSpec controls how often the source is re-synced.
                 properties:

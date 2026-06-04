@@ -18,7 +18,7 @@ type RerankSpec struct {
 
 // GenerationSpec turns the retriever into a full RAG endpoint: after retrieval
 // it asks an LLM to synthesize an answer grounded in the retrieved chunks.
-// +kubebuilder:validation:XValidation:rule="self.provider != 'openai-compatible' || (has(self.baseURL) && self.baseURL != '')",message="baseURL is required when provider is openai-compatible"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)",message="baseURL is required when provider is openai-compatible"
 type GenerationSpec struct {
 	// +kubebuilder:default=true
 	// +optional
