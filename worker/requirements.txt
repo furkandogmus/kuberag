@@ -1,16 +1,16 @@
 # Core (always needed by the worker)
-fastembed==0.3.6
-qdrant-client==1.11.3
-kubernetes==30.1.0
+fastembed==0.8.0
+qdrant-client==1.18.0
+kubernetes==36.0.2
 
 # Source backends
-boto3==1.34.162          # s3
-requests==2.32.3         # web crawl
+boto3==1.43.22          # s3
+requests==2.34.2         # web crawl
 
 # Optional vector stores (kept here so the single worker image is fully capable)
-psycopg[binary]==3.2.1   # pgvector
-pymilvus==2.4.6          # milvus
+psycopg[binary]==3.3.4   # pgvector
+pymilvus==3.0.0          # milvus
 
 # Optional embedding provider (httpx pinned: openai 1.40.x breaks on httpx>=0.28)
-openai==1.40.6
-httpx==0.27.2
+openai==2.41.0
+httpx==0.28.1
