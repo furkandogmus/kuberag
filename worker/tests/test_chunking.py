@@ -37,6 +37,37 @@ class TestChunking(unittest.TestCase):
         chunks = chunk_text(text, max_tokens=800, overlap=0, strategy="semantic")
         self.assertGreaterEqual(len(chunks), 2)
 
+    def test_recursive_prefers_paragraph_boundaries(self):
+        # Two ~60-word paragraphs; with max ~76 words each fits its own chunk,
+        # so a separator-aware splitter keeps them apart rather than mid-paragraph.
+        p1 = " ".join(f"a{i}" for i in range(60))
+        p2 = " ".join(f"b{i}" for i in range(60))
+        chunks = chunk_text(f"{p1}\n\n{p2}", max_tokens=100, overlap=0, strategy="recursive")
+        self.assertEqual(len(chunks), 2)
+        # Each chunk stays within one paragraph (no a*/b* mixing).
+        self.assertTrue(all(w.startswith("a") for w in chunks[0].split()))
+        self.assertTrue(all(w.startswith("b") for w in chunks[1].split()))
+
+    def test_recursive_differs_from_fixed(self):
+        # fixed is structure-blind: a window straddles the paragraph break and
+        # mixes the two paragraphs; recursive does not.
+        p1 = " ".join(f"a{i}" for i in range(60))
+        p2 = " ".join(f"b{i}" for i in range(60))
+        text = f"{p1}\n\n{p2}"
+        fixed = chunk_text(text, max_tokens=100, overlap=0, strategy="fixed")
+        first_fixed = set(w[0] for w in fixed[0].split())
+        self.assertEqual(first_fixed, {"a", "b"}, "fixed window should straddle the break")
+
+    def test_recursive_respects_max_tokens(self):
+        text = " ".join(f"w{i}" for i in range(1000))
+        chunks = chunk_text(text, max_tokens=100, overlap=10, strategy="recursive")
+        self.assertGreater(len(chunks), 1)
+        for c in chunks:
+            self.assertLessEqual(len(c.split()), 80)
+
+    def test_recursive_empty_text(self):
+        self.assertEqual(chunk_text("", 800, 80, "recursive"), [])
+
     def test_empty_text(self):
         self.assertEqual(chunk_text("", 800, 80, "semantic"), [])
 

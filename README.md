@@ -46,6 +46,7 @@ loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — control/data planes, reconcile state machine, ingest/eval/auto-tune, hashing.
+- [Configuration & tuning](docs/TUNING.md) — what every knob does and which to pick: chunking strategies, embedding/store choices, retrieval & auto-tune tuning, ready-made profiles.
 - [API reference](docs/API.md) — every CRD field (`KnowledgeBase`, `Retriever`, `VectorIndex`).
 - [Providers & backends](docs/PROVIDERS.md) — sources, stores, embeddings, generation (+ fully-local Ollama).
 - [Observability](docs/OBSERVABILITY.md) — status/conditions, events, Prometheus metrics, Grafana dashboard.
@@ -68,7 +69,82 @@ loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
 
 ## Architecture
 
-![kuberag Architecture](docs/images/architecture.svg)
+```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'fontSize':'14px',
+  'lineColor':'#94a3b8',
+  'clusterBorder':'#cbd5e1',
+  'clusterBkg':'#ffffff00'
+}}}%%
+flowchart LR
+  classDef crd      fill:#fef3c7,stroke:#f59e0b,stroke-width:1.5px,color:#0f172a;
+  classDef control  fill:#eef2ff,stroke:#6366f1,stroke-width:1.5px,color:#0f172a;
+  classDef data     fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#0f172a;
+  classDef store    fill:#fae8ff,stroke:#a855f7,stroke-width:1.5px,color:#0f172a;
+  classDef ext      fill:#f1f5f9,stroke:#64748b,stroke-width:1.5px,color:#0f172a;
+  classDef user     fill:#0f172a,stroke:#0f172a,stroke-width:1.5px,color:#f8fafc;
+
+  User(["👤 Client"]):::user
+
+  subgraph Sources["📥 Sources"]
+    direction TB
+    Git[("Git repo")]:::ext
+    S3[("S3 / MinIO")]:::ext
+    Web[("Web crawl")]:::ext
+  end
+
+  subgraph K8s["☸️ Kubernetes Cluster"]
+    direction TB
+
+    subgraph CP["Control Plane · Go operator"]
+      direction TB
+      KB["KnowledgeBase<br/><i>kb</i>"]:::crd
+      RTR["Retriever<br/><i>rtr</i>"]:::crd
+      VI["VectorIndex<br/><i>vi</i>"]:::crd
+      REC{{"Reconciler<br/>specHash · schedule<br/>ingest / eval / auto-tune"}}:::control
+      KB -. watch .-> REC
+      RTR -. watch .-> REC
+      REC -->|"owns / health"| VI
+    end
+
+    subgraph DP["Data Plane · Python worker"]
+      direction TB
+      JOB["Ingest / Eval / Cleanup<br/>Job (rag_worker)"]:::data
+      RES["Result ConfigMap"]:::data
+      SRV["Retriever API<br/>(FastAPI Deployment)"]:::data
+      JOB --> RES
+    end
+
+    REC ==>|"spawns one Job"| JOB
+    RES -. "status · conditions · metrics" .-> REC
+    REC ==>|"deploys"| SRV
+  end
+
+  subgraph Stores["🗄️ Vector Stores"]
+    direction TB
+    QD[("Qdrant")]:::store
+    PG[("pgvector")]:::store
+    MV[("Milvus")]:::store
+  end
+
+  subgraph AI["🧠 AI APIs"]
+    direction TB
+    EMB["Embeddings<br/>FastEmbed · OpenAI · Gemini · Ollama"]:::ext
+    GEN["Generation<br/>OpenAI · Gemini · Groq · Ollama"]:::ext
+  end
+
+  Sources -->|"1 · pull"| JOB
+  JOB -->|"2 · chunk + embed"| EMB
+  JOB -->|"3 · upsert"| Stores
+
+  User -->|"/query"| SRV
+  SRV -->|"a · vector + lexical search (RRF)"| Stores
+  SRV -->|"b · ground answer"| GEN
+  SRV -->|"c · answer + sources"| User
+```
+
+> Diagram source: [`docs/images/architecture.mermaid`](docs/images/architecture.mermaid). GitHub renders the block above natively — no build step.
 
 Two planes, intentionally separated:
 

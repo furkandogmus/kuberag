@@ -14,6 +14,14 @@ type RerankSpec struct {
 	// +kubebuilder:default=bge-reranker-base
 	// +optional
 	Model string `json:"model,omitempty"`
+	// CandidatePoolSize is how many candidates to retrieve before reranking;
+	// the reranker then returns the top `topK`. A larger pool gives the reranker
+	// more to work with (better quality) at the cost of latency. 0 means auto
+	// (max(4×topK, 20)).
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	CandidatePoolSize int `json:"candidatePoolSize,omitempty"`
 }
 
 // GenerationSpec turns the retriever into a full RAG endpoint: after retrieval
@@ -58,6 +66,22 @@ type RetrieverSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TopK int `json:"topK,omitempty"`
+	// Hybrid enables hybrid retrieval (dense vector + lexical search fused with
+	// Reciprocal Rank Fusion) by default for every query. Individual requests can
+	// still override it via the `hybrid` field on /query. Best when exact
+	// keywords/identifiers matter as much as semantic similarity.
+	// +kubebuilder:default=false
+	// +optional
+	Hybrid bool `json:"hybrid,omitempty"`
+	// HybridDensePercent weights dense (vector) vs lexical search when fusing
+	// hybrid results with RRF: the dense contribution is scaled by this percent
+	// and the lexical by the remainder (e.g. 70 => 0.7 dense / 0.3 lexical).
+	// Only applies when hybrid retrieval is active. Unset = 50 (equal weighting);
+	// 0 = pure lexical, 100 = pure dense.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	HybridDensePercent *int `json:"hybridDensePercent,omitempty"`
 	// ScoreThresholdPercent drops results below this similarity (0-100).
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100

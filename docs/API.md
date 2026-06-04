@@ -2,6 +2,9 @@
 
 API group `rag.furkan.dev`, version `v1alpha1`. Short names: `kb`, `rtr`, `vi`.
 
+> Looking for *which value to pick* rather than the full field list? See the
+> [Configuration & tuning guide](TUNING.md).
+
 ## KnowledgeBase (`kb`)
 
 The desired knowledge state.
@@ -72,9 +75,12 @@ A serving endpoint over a KnowledgeBase.
 |-------|------|---------|-------------|
 | `knowledgeBaseRef.name` | string | — | KnowledgeBase to serve (same namespace). |
 | `topK` | int | `8` | Default chunks per query. |
+| `hybrid` | bool | `false` | Default every query to hybrid (vector + lexical, RRF) retrieval. Per-request `hybrid` still overrides. |
+| `hybridDensePercent` | int 0–100 | `50` | Dense-vs-lexical weight in hybrid RRF fusion (`70` = 0.7 dense / 0.3 lexical; `0` = pure lexical, `100` = pure dense). |
 | `scoreThresholdPercent` | int 0–100 | `0` | Drop results below this similarity. |
 | `rerank.enabled` | bool | `false` | Cross-encoder rerank of candidates. |
 | `rerank.model` | string | `bge-reranker-base` | Reranker model. |
+| `rerank.candidatePoolSize` | int ≥0 | `0` (auto) | Candidates retrieved before reranking; reranker returns the top `topK`. `0` = `max(4×topK, 20)`. |
 | `replicas` | int | `1` | Server replicas (scale subresource enabled). |
 | `image` | string | built-in | Override the retriever image. |
 | `resources` | core/v1 ResourceRequirements | — | Retriever pod resources. |

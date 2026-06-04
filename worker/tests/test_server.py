@@ -36,12 +36,14 @@ class TestRetrieverServer(unittest.TestCase):
         server._gen_client = self.mock_gen_client
         server._GEN_ENABLED = True
         server._RERANK = False
+        server._HYBRID_DEFAULT = False
 
     def tearDown(self):
         self.patcher_ensure.stop()
         server._embedder = None
         server._store = None
         server._gen_client = None
+        server._HYBRID_DEFAULT = False
 
     def test_query_with_source_filter(self):
         # Mock embedder output
@@ -190,6 +192,88 @@ class TestRetrieverServer(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["docPath"], "docA")
         self.assertEqual(results[1]["docPath"], "docC")
+
+    def test_hybrid_default_triggers_lexical_search(self):
+        # With the Retriever's spec.hybrid default on, a request that doesn't
+        # set `hybrid` should still run both vector and lexical search.
+        server._HYBRID_DEFAULT = True
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.9, "payload": {"source": "s1", "doc_path": "docA", "text": "hello"}},
+        ]
+        self.mock_store.search_text.return_value = [
+            {"score": 1.0, "payload": {"source": "s1", "doc_path": "docA", "text": "hello"}},
+        ]
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+
+        resp = self.client.post("/query", json={"query": "hello", "topK": 5})
+        self.assertEqual(resp.status_code, 200)
+        self.mock_store.search_text.assert_called_once()
+
+    def test_request_can_override_hybrid_default_off(self):
+        # spec default on, but the request explicitly disables hybrid.
+        server._HYBRID_DEFAULT = True
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = []
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+
+        resp = self.client.post("/query", json={"query": "hello", "hybrid": False})
+        self.assertEqual(resp.status_code, 200)
+        self.mock_store.search_text.assert_not_called()
+
+    def test_rerank_candidate_pool_size(self):
+        # When reranking, RERANK_CANDIDATES sets how many candidates are fetched.
+        server._RERANK = True
+        server._RERANK_CANDIDATES = 50
+        server._reranker = MagicMock()
+        server._reranker.rerank.return_value = [0.5]
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.9, "payload": {"source": "s1", "doc_path": "docA", "text": "hello"}},
+        ]
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+        try:
+            resp = self.client.post("/query", json={"query": "hello", "topK": 5})
+            self.assertEqual(resp.status_code, 200)
+            self.mock_store.search.assert_called_once_with(
+                [0.1, 0.2, 0.3], 50, source=None, doc_path=None, doc_path_prefix=None
+            )
+        finally:
+            server._RERANK = False
+            server._RERANK_CANDIDATES = 0
+            server._reranker = None
+
+    def test_hybrid_dense_weight_changes_ranking(self):
+        # docB appears only via vector search, docC only via lexical search.
+        # The dense/lexical weight should decide which ranks first.
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = [
+            {"score": 0.9, "payload": {"source": "s1", "doc_path": "docB", "text": "vec"}},
+        ]
+        self.mock_store.search_text.return_value = [
+            {"score": 1.0, "payload": {"source": "s1", "doc_path": "docC", "text": "lex"}},
+        ]
+        mock_choice = MagicMock()
+        mock_choice.message.content = "answer"
+        self.mock_gen_client.chat.completions.create.return_value.choices = [mock_choice]
+
+        original = server._HYBRID_DENSE_W
+        try:
+            server._HYBRID_DENSE_W = 0.9  # favour dense
+            resp = self.client.post("/query", json={"query": "q", "hybrid": True, "topK": 2})
+            self.assertEqual(resp.json()["results"][0]["docPath"], "docB")
+
+            server._HYBRID_DENSE_W = 0.1  # favour lexical
+            resp = self.client.post("/query", json={"query": "q", "hybrid": True, "topK": 2})
+            self.assertEqual(resp.json()["results"][0]["docPath"], "docC")
+        finally:
+            server._HYBRID_DENSE_W = original
 
     def test_query_with_generation_overrides(self):
         self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]

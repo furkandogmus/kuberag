@@ -3,7 +3,8 @@
 Config comes entirely from env (set by the operator):
   VECTORSTORE_TYPE, VECTORSTORE_ENDPOINT, VECTORSTORE_COLLECTION, VECTORSTORE_CREDENTIAL
   EMBEDDING_MODEL, EMBEDDING_PROVIDER, EMBEDDING_BASE_URL, EMBEDDING_DIMENSION, EMBEDDING_API_KEY
-  TOPK, SCORE_THRESHOLD, RERANK_ENABLED, RERANK_MODEL
+  TOPK, SCORE_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_CANDIDATES
+  HYBRID_DEFAULT, HYBRID_DENSE_PERCENT
   GEN_ENABLED, GEN_PROVIDER, GEN_MODEL, GEN_BASE_URL, GEN_API_KEY, GEN_MAX_TOKENS, GEN_SYSTEM_PROMPT
 """
 from __future__ import annotations
@@ -33,6 +34,12 @@ app = FastAPI(title="kuberag-retriever", lifespan=lifespan)
 _DEFAULT_TOPK = int(os.environ.get("TOPK", "8"))
 _SCORE_THRESHOLD = int(os.environ.get("SCORE_THRESHOLD", "0")) / 100.0
 _RERANK = os.environ.get("RERANK_ENABLED", "false").lower() == "true"
+# Candidates retrieved before reranking; 0 => auto (max(4×topK, 20)).
+_RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "0") or 0)
+# Default hybrid (vector + lexical) retrieval when a request doesn't specify.
+_HYBRID_DEFAULT = os.environ.get("HYBRID_DEFAULT", "false").lower() == "true"
+# Dense (vector) weight in hybrid RRF fusion; lexical gets the remainder.
+_HYBRID_DENSE_W = int(os.environ.get("HYBRID_DENSE_PERCENT", "50") or 50) / 100.0
 _GEN_ENABLED = os.environ.get("GEN_ENABLED", "false").lower() == "true"
 
 # OpenAI-compatible chat base URLs per provider.
@@ -125,22 +132,28 @@ def _generate(
     return resp.choices[0].message.content or ""
 
 
-def rrf(vector_hits: list[dict], text_hits: list[dict], k: int = 60) -> list[dict]:
+def rrf(
+    vector_hits: list[dict],
+    text_hits: list[dict],
+    k: int = 60,
+    dense_weight: float = 1.0,
+    text_weight: float = 1.0,
+) -> list[dict]:
     scores = {}
     payloads = {}
-    
+
     def make_key(h):
         p = h["payload"]
         return (p.get("source", ""), p.get("doc_path", ""), p.get("text", ""))
-    
+
     for rank, h in enumerate(vector_hits):
         key = make_key(h)
-        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        scores[key] = scores.get(key, 0.0) + dense_weight / (k + rank + 1)
         payloads[key] = h["payload"]
-        
+
     for rank, h in enumerate(text_hits):
         key = make_key(h)
-        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+        scores[key] = scores.get(key, 0.0) + text_weight / (k + rank + 1)
         payloads[key] = h["payload"]
         
     fused = []
@@ -165,7 +178,7 @@ class QueryRequest(BaseModel):
     history: list[Message] | None = None
     docPath: str | None = Field(default=None, min_length=1)
     docPathPrefix: str | None = Field(default=None, min_length=1)
-    hybrid: bool | None = False
+    hybrid: bool | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     systemPrompt: str | None = Field(default=None, min_length=1)
     maxTokens: int | None = Field(default=None, ge=1, le=8192)
@@ -193,9 +206,18 @@ def healthz() -> dict:
 def query(req: QueryRequest) -> QueryResponse:
     _ensure()
     topk = req.topK or _DEFAULT_TOPK
-    fetch_k = topk * 4 if _RERANK else (max(topk * 3, 20) if req.hybrid else topk)
-    
-    if req.hybrid:
+    use_hybrid = req.hybrid if req.hybrid is not None else _HYBRID_DEFAULT
+
+    if _RERANK:
+        # Give the reranker a deeper candidate pool, then return the top `topk`.
+        fetch_k = _RERANK_CANDIDATES if _RERANK_CANDIDATES > 0 else max(topk * 4, 20)
+    elif use_hybrid:
+        fetch_k = max(topk * 3, 20)
+    else:
+        fetch_k = topk
+    fetch_k = max(fetch_k, topk)
+
+    if use_hybrid:
         qv = _embedder.embed_query(req.query)
         vector_hits = _store.search(
             qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
@@ -203,7 +225,10 @@ def query(req: QueryRequest) -> QueryResponse:
         text_hits = _store.search_text(
             req.query, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
         )
-        hits = rrf(vector_hits, text_hits)
+        hits = rrf(
+            vector_hits, text_hits,
+            dense_weight=_HYBRID_DENSE_W, text_weight=1.0 - _HYBRID_DENSE_W,
+        )
     else:
         qv = _embedder.embed_query(req.query)
         hits = _store.search(
@@ -218,7 +243,7 @@ def query(req: QueryRequest) -> QueryResponse:
 
     results = []
     for h in hits[:topk]:
-        is_rrf_score = req.hybrid and not _RERANK
+        is_rrf_score = use_hybrid and not _RERANK
         if not is_rrf_score and h["score"] < _SCORE_THRESHOLD:
             continue
         p = h["payload"]

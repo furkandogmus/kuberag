@@ -464,6 +464,11 @@ func (in *RetrieverSpec) DeepCopyInto(out *RetrieverSpec) {
 		*out = new(GenerationSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.HybridDensePercent != nil {
+		in, out := &in.HybridDensePercent, &out.HybridDensePercent
+		*out = new(int)
+		**out = **in
+	}
 	if in.Rerank != nil {
 		in, out := &in.Rerank, &out.Rerank
 		*out = new(RerankSpec)

@@ -118,6 +118,13 @@ func boolPtrVal(b *bool, def bool) bool {
 	return *b
 }
 
+func intPtrVal(i *int, def int) int {
+	if i == nil {
+		return def
+	}
+	return *i
+}
+
 func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase, secretHash string) *appsv1.Deployment {
 	labels := map[string]string{
 		labelManagedBy:             "kuberag",
@@ -130,8 +137,10 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 	}
 	rerankEnabled := rt.Spec.Rerank != nil && boolPtrVal(rt.Spec.Rerank.Enabled, false)
 	rerankModel := ""
+	rerankCandidates := 0
 	if rt.Spec.Rerank != nil {
 		rerankModel = rt.Spec.Rerank.Model
+		rerankCandidates = rt.Spec.Rerank.CandidatePoolSize
 	}
 
 	emb := kb.Spec.Embedding
@@ -148,6 +157,9 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		{Name: "SCORE_THRESHOLD", Value: fmt.Sprintf("%d", rt.Spec.ScoreThresholdPercent)},
 		{Name: "RERANK_ENABLED", Value: fmt.Sprintf("%t", rerankEnabled)},
 		{Name: "RERANK_MODEL", Value: rerankModel},
+		{Name: "RERANK_CANDIDATES", Value: fmt.Sprintf("%d", rerankCandidates)},
+		{Name: "HYBRID_DEFAULT", Value: fmt.Sprintf("%t", rt.Spec.Hybrid)},
+		{Name: "HYBRID_DENSE_PERCENT", Value: fmt.Sprintf("%d", intPtrVal(rt.Spec.HybridDensePercent, 50))},
 	}
 	if kb.Spec.VectorStore.CredentialsSecretRef != nil {
 		env = append(env, secretEnv("VECTORSTORE_CREDENTIAL", kb.Spec.VectorStore.CredentialsSecretRef))

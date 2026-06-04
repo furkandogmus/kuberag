@@ -1,62 +1,75 @@
-graph TD
-    %% Custom Styles & Classes
-    classDef control fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
-    classDef data fill:#0f172a,stroke:#34d399,stroke-width:2px,color:#f8fafc;
-    classDef external fill:#1e1b4b,stroke:#818cf8,stroke-width:1px,color:#e0e7ff;
-    classDef resources fill:#0f172a,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+%%{init: {'theme':'base','themeVariables':{
+  'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'fontSize':'14px',
+  'lineColor':'#94a3b8',
+  'clusterBorder':'#cbd5e1',
+  'clusterBkg':'#ffffff00'
+}}}%%
+flowchart LR
+  %% ---- palette (explicit fills => readable in GitHub light AND dark) ----
+  classDef crd      fill:#fef3c7,stroke:#f59e0b,stroke-width:1.5px,color:#0f172a;
+  classDef control  fill:#eef2ff,stroke:#6366f1,stroke-width:1.5px,color:#0f172a;
+  classDef data     fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#0f172a;
+  classDef store    fill:#fae8ff,stroke:#a855f7,stroke-width:1.5px,color:#0f172a;
+  classDef ext      fill:#f1f5f9,stroke:#64748b,stroke-width:1.5px,color:#0f172a;
+  classDef user     fill:#0f172a,stroke:#0f172a,stroke-width:1.5px,color:#f8fafc;
 
-    subgraph K8S [Kubernetes Cluster]
-        subgraph CP [Control Plane - Go Operator]
-            KB[KnowledgeBase CRD]:::resources
-            RTR[Retriever CRD]:::resources
-            VI[VectorIndex CRD]:::resources
+  User(["👤 Client"]):::user
 
-            KBC[KnowledgeBase Controller]:::control
-            RTRC[Retriever Controller]:::control
-            VIC[VectorIndex Controller]:::control
+  subgraph Sources["📥 Sources"]
+    direction TB
+    Git[("Git repo")]:::ext
+    S3[("S3 / MinIO")]:::ext
+    Web[("Web crawl")]:::ext
+  end
 
-            KB -.->|Watched by| KBC
-            RTR -.->|Watched by| RTRC
-            VI -.->|Watched by| VIC
+  subgraph K8s["☸️ Kubernetes Cluster"]
+    direction TB
 
-            KBC -->|Creates & Reconciles| VI
-            KBC -->|Spawns| IngestJob[Ingestion / Eval Job]:::control
-            RTRC -->|Deploys & Exposes| FastAPI[Retriever FastAPI Pod]:::control
-        end
-
-        subgraph DP [Data Plane - Python Worker]
-            IngestJob -->|Runs| Worker[rag_worker]:::data
-            Worker -->|Read Results| ResCM[Result ConfigMap]:::data
-            ResCM -->|Update Status| KBC
-        end
+    subgraph CP["Control Plane · Go operator"]
+      direction TB
+      KB["KnowledgeBase<br/><i>kb</i>"]:::crd
+      RTR["Retriever<br/><i>rtr</i>"]:::crd
+      VI["VectorIndex<br/><i>vi</i>"]:::crd
+      REC{{"Reconciler<br/>specHash · schedule<br/>ingest / eval / auto-tune"}}:::control
+      KB -. watch .-> REC
+      RTR -. watch .-> REC
+      REC -->|"owns / health"| VI
     end
 
-    %% External Connections
-    subgraph ExtSources [Data Sources]
-        Git[(Git Repo)]:::external
-        S3[(S3 Bucket)]:::external
-        Web[(Web Crawl)]:::external
+    subgraph DP["Data Plane · Python worker"]
+      direction TB
+      JOB["Ingest / Eval / Cleanup<br/>Job (rag_worker)"]:::data
+      RES["Result ConfigMap"]:::data
+      SRV["Retriever API<br/>(FastAPI Deployment)"]:::data
+      JOB --> RES
     end
 
-    subgraph ExtStores [Vector Stores]
-        Qdrant[(Qdrant)]:::external
-        PgVector[(pgvector)]:::external
-        Milvus[(Milvus)]:::external
-    end
+    REC ==>|"spawns one Job"| JOB
+    RES -. "status · conditions · metrics" .-> REC
+    REC ==>|"deploys"| SRV
+  end
 
-    subgraph ExtAPIs [AI / LLM APIs]
-        EmbedAPI[Embeddings: FastEmbed / OpenAI / Gemini / Ollama]:::external
-        GenAPI[Generation: Ollama / OpenAI / Gemini]:::external
-    end
+  subgraph Stores["🗄️ Vector Stores"]
+    direction TB
+    QD[("Qdrant")]:::store
+    PG[("pgvector")]:::store
+    MV[("Milvus")]:::store
+  end
 
-    %% Data Plane Actions
-    Worker -->|1. Pull| ExtSources
-    Worker -->|2. Chunk & Embed| EmbedAPI
-    Worker -->|3. Upsert| ExtStores
+  subgraph AI["🧠 AI APIs"]
+    direction TB
+    EMB["Embeddings<br/>FastEmbed · OpenAI · Gemini · Ollama"]:::ext
+    GEN["Generation<br/>OpenAI · Gemini · Groq · Ollama"]:::ext
+  end
 
-    %% Serving/Query Path
-    User([User Client]) -->|/query| FastAPI
-    FastAPI -->|1. Hybrid Vector + Lexical Search| ExtStores
-    FastAPI -->|2. Reciprocal Rank Fusion RRF| FastAPI
-    FastAPI -->|3. Ground Answer| GenAPI
-    GenAPI -->|4. Return Response| User
+  %% ---- ingest pipeline ----
+  Sources -->|"1 · pull"| JOB
+  JOB -->|"2 · chunk + embed"| EMB
+  JOB -->|"3 · upsert"| Stores
+
+  %% ---- serve / query path ----
+  User -->|"/query"| SRV
+  SRV -->|"a · vector + lexical search (RRF)"| Stores
+  SRV -->|"b · ground answer"| GEN
+  SRV -->|"c · answer + sources"| User

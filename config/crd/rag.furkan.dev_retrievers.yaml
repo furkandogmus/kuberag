@@ -1021,6 +1021,24 @@ spec:
                 - message: baseURL is required when provider is openai-compatible
                   rule: self.provider != 'openai-compatible' || (has(self.baseURL)
                     && size(self.baseURL) > 0)
+              hybrid:
+                default: false
+                description: |-
+                  Hybrid enables hybrid retrieval (dense vector + lexical search fused with
+                  Reciprocal Rank Fusion) by default for every query. Individual requests can
+                  still override it via the `hybrid` field on /query. Best when exact
+                  keywords/identifiers matter as much as semantic similarity.
+                type: boolean
+              hybridDensePercent:
+                description: |-
+                  HybridDensePercent weights dense (vector) vs lexical search when fusing
+                  hybrid results with RRF: the dense contribution is scaled by this percent
+                  and the lexical by the remainder (e.g. 70 => 0.7 dense / 0.3 lexical).
+                  Only applies when hybrid retrieval is active. Unset = 50 (equal weighting);
+                  0 = pure lexical, 100 = pure dense.
+                maximum: 100
+                minimum: 0
+                type: integer
               image:
                 description: Image overrides the retriever server image.
                 type: string
@@ -1049,6 +1067,15 @@ spec:
                 description: RerankSpec configures optional cross-encoder reranking
                   of retrieved chunks.
                 properties:
+                  candidatePoolSize:
+                    default: 0
+                    description: |-
+                      CandidatePoolSize is how many candidates to retrieve before reranking;
+                      the reranker then returns the top `topK`. A larger pool gives the reranker
+                      more to work with (better quality) at the cost of latency. 0 means auto
+                      (max(4×topK, 20)).
+                    minimum: 0
+                    type: integer
                   enabled:
                     default: false
                     type: boolean
