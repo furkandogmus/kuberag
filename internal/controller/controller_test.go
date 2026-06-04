@@ -322,7 +322,7 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 	if len(depPodSpec.Tolerations) != 1 || depPodSpec.Tolerations[0].Key != "gpu" {
 		t.Error("expected Tolerations to be mapped")
 	}
-	if dep.Spec.Template.ObjectMeta.Annotations["checksum/secrets"] != "some-hash" {
+	if dep.Spec.Template.Annotations["checksum/secrets"] != "some-hash" {
 		t.Error("expected checksum annotation to be mapped")
 	}
 
