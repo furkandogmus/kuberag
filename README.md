@@ -115,12 +115,21 @@ make sample             # Qdrant + worker RBAC + eval dataset + KnowledgeBase + 
 kubectl get kb,vi,rtr
 ```
 
-In-cluster:
+In-cluster (prebuilt images are published to GHCR by CI, so you can skip the build):
 
 ```bash
-make docker-build-all   # operator + worker + retriever images
-make deploy             # CRDs + RBAC + manager
+# ghcr.io/furkandogmus/{kuberag,kuberag-worker,kuberag-retriever}:latest
+make deploy             # CRDs + RBAC + manager (pulls the published images)
 make worker-rbac        # worker ServiceAccount/RBAC (per KB namespace)
+
+# or build your own first:
+make docker-build-all   # operator + worker + retriever images
+```
+
+Or run the whole thing on a throwaway k3d cluster with one script:
+
+```bash
+./hack/demo.sh          # k3d up -> deploy -> ingest a repo -> query
 ```
 
 ### Fully local RAG with Ollama (no API keys)
