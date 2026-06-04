@@ -1,0 +1,46 @@
+# Fully local RAG via Ollama (no API keys, no quotas).
+# Requires Ollama reachable from the cluster:
+#   launchctl setenv OLLAMA_HOST 0.0.0.0 && brew services restart ollama
+# Pull the models first:
+#   ollama pull nomic-embed-text && ollama pull qwen2.5:3b
+#
+# host.docker.internal is injected by k3d and routes to the host.
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: ollama-docs
+  namespace: default
+spec:
+  sources:
+    - name: site
+      type: web
+      web:
+        urls: ["https://httpbin.org/html"]
+        maxDepth: 0
+        maxPages: 3
+  chunking: { strategy: fixed, maxTokens: 300, overlap: 20 }
+  embedding:
+    provider: openai-compatible
+    model: nomic-embed-text
+    baseURL: http://host.docker.internal:11434/v1   # dimension auto-detected (768)
+  vectorStore:
+    type: qdrant
+    endpoint: http://qdrant.default.svc.cluster.local:6333
+    collection: ollama_docs
+  ingestion: { mode: full }
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: ollama-docs
+  namespace: default
+spec:
+  knowledgeBaseRef: { name: ollama-docs }
+  topK: 3
+  generation:
+    enabled: true
+    provider: openai-compatible
+    model: qwen2.5:3b
+    baseURL: http://host.docker.internal:11434/v1
+    maxTokens: 400

@@ -1,0 +1,41 @@
+# Small, fast KnowledgeBase used for end-to-end smoke testing on a local cluster.
+# Tiny repo -> quick clone + embed. retrievalQuality disabled to keep the loop simple.
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: e2e-docs
+  namespace: default
+spec:
+  sources:
+    - name: readme
+      type: github
+      github:
+        repo: sindresorhus/awesome
+        ref: main
+        includeGlobs:
+          - "*.md"
+  chunking:
+    strategy: semantic
+    maxTokens: 400
+    overlap: 40
+  embedding:
+    model: bge-small
+    provider: local
+  vectorStore:
+    type: qdrant
+    endpoint: http://qdrant.default.svc.cluster.local:6333
+    collection: e2e-docs
+    distance: cosine
+  ingestion:
+    mode: full
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: e2e-docs
+  namespace: default
+spec:
+  knowledgeBaseRef:
+    name: e2e-docs
+  topK: 5
+  replicas: 1

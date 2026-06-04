@@ -1,0 +1,22 @@
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: web-docs
+  namespace: default
+spec:
+  sources:
+    - name: site
+      type: web
+      web:
+        urls:
+          - "https://httpbin.org/html"
+        maxDepth: 0
+        maxPages: 5
+  chunking: { strategy: fixed, maxTokens: 200, overlap: 20 }
+  embedding: { model: bge-small, provider: local }
+  vectorStore:
+    type: qdrant
+    endpoint: http://qdrant.default.svc.cluster.local:6333
+    collection: web_docs
+    distance: cosine
+  ingestion: { mode: full }

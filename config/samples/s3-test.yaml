@@ -1,0 +1,89 @@
+# Minimal MinIO (S3-compatible) for local testing + a bucket seeded with markdown.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-creds
+  namespace: default
+type: Opaque
+stringData:
+  accessKey: minioadmin
+  secretKey: minioadmin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels: { app: minio }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  template:
+    metadata: { labels: { app: minio } }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - { name: MINIO_ROOT_USER, value: minioadmin }
+            - { name: MINIO_ROOT_PASSWORD, value: minioadmin }
+          ports: [{ containerPort: 9000, name: s3 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  selector: { app: minio }
+  ports: [{ name: s3, port: 9000, targetPort: 9000 }]
+---
+# Seed the bucket with a couple of markdown documents.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-seed
+  namespace: default
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          image: minio/mc:RELEASE.2024-09-16T17-43-14Z
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              until mc alias set m http://minio.default.svc.cluster.local:9000 minioadmin minioadmin; do sleep 2; done
+              mc mb --ignore-existing m/docs
+              printf '# Kubernetes Operators\n\nAn operator encodes operational knowledge to manage a workload. It watches custom resources and reconciles desired state.\n' > /tmp/operators.md
+              printf '# Vector Databases\n\nVector databases store embeddings and support approximate nearest neighbor search for retrieval augmented generation.\n' > /tmp/vectors.md
+              mc cp /tmp/operators.md m/docs/operators.md
+              mc cp /tmp/vectors.md m/docs/vectors.md
+              echo "seeded bucket docs"
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: s3-docs
+  namespace: default
+spec:
+  sources:
+    - name: bucket
+      type: s3
+      s3:
+        bucket: docs
+        region: us-east-1
+        endpoint: http://minio.default.svc.cluster.local:9000
+        includeGlobs: ["*.md"]
+        accessKeySecretRef: { name: s3-creds, key: accessKey }
+        secretKeySecretRef: { name: s3-creds, key: secretKey }
+  chunking: { strategy: semantic, maxTokens: 200, overlap: 20 }
+  embedding: { model: bge-small, provider: local }
+  vectorStore:
+    type: qdrant
+    endpoint: http://qdrant.default.svc.cluster.local:6333
+    collection: s3_docs
+    distance: cosine
+  ingestion: { mode: full }

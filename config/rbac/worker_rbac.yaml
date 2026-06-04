@@ -1,0 +1,34 @@
+# ServiceAccount + RBAC for ingestion/eval/cleanup Jobs.
+#
+# Jobs run in the SAME namespace as the KnowledgeBase. Apply this in every
+# namespace where you create KnowledgeBases (shown here for "default").
+# The worker only needs to publish its result ConfigMap and read the eval dataset.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rag-operator-worker
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rag-operator-worker
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rag-operator-worker
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rag-operator-worker
+subjects:
+  - kind: ServiceAccount
+    name: rag-operator-worker
+    namespace: default

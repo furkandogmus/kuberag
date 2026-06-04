@@ -1,0 +1,61 @@
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: company-docs
+  namespace: default
+spec:
+  sources:
+    - name: docs-repo
+      type: github
+      github:
+        repo: qdrant/landing_page
+        ref: master
+        includeGlobs:
+          - "qdrant-landing/content/documentation/**/*.md"
+    # Add more sources freely; each is synced and tracked independently.
+    # - name: handbook
+    #   type: s3
+    #   s3:
+    #     bucket: company-handbook
+    #     prefix: published/
+    #     region: eu-central-1
+    #     accessKeySecretRef: { name: s3-creds, key: accessKey }
+    #     secretKeySecretRef: { name: s3-creds, key: secretKey }
+    # - name: blog
+    #   type: web
+    #   web:
+    #     urls: ["https://example.com/blog"]
+    #     maxDepth: 2
+    #     sameDomainOnly: true
+
+  chunking:
+    strategy: semantic
+    maxTokens: 800
+    overlap: 80
+
+  embedding:
+    model: bge-small      # change to bge-large -> automatic full re-embed
+    provider: local
+
+  vectorStore:
+    type: qdrant
+    endpoint: http://qdrant.default.svc.cluster.local:6333
+    collection: company-docs
+    distance: cosine
+
+  ingestion:
+    mode: incremental     # unchanged sources are skipped via revision probe
+
+  freshness:
+    schedule: "0 */6 * * *"   # re-sync sources every 6 hours
+
+  retrievalQuality:
+    enabled: true
+    evalSchedule: "0 * * * *" # evaluate hourly
+    datasetRef:
+      name: company-docs-eval
+    topK: 8
+    minimumRecallPercent: 80
+    autoTune:
+      enabled: true          # below target -> tune chunking and re-index
+      maxAttempts: 3

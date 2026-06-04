@@ -1,0 +1,14 @@
+# Eval dataset for the e2e-docs KnowledgeBase (sindresorhus/awesome readme).
+# recall@k = fraction of queries for which an expected doc path is retrieved.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-docs-eval
+  namespace: default
+data:
+  dataset.jsonl: |
+    {"query": "machine learning and deep learning resources", "expectedSources": ["awesome/readme.md"]}
+    {"query": "javascript frameworks and libraries", "expectedSources": ["awesome/readme.md"]}
+    {"query": "databases and big data", "expectedSources": ["awesome/readme.md"]}
+    {"query": "security and cryptography", "expectedSources": ["awesome/readme.md"]}
+    {"query": "front end development", "expectedSources": ["awesome/readme.md"]}

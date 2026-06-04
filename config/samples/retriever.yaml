@@ -1,0 +1,17 @@
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: company-docs
+  namespace: default
+spec:
+  knowledgeBaseRef:
+    name: company-docs
+  topK: 8
+  scoreThresholdPercent: 20
+  replicas: 2
+  rerank:
+    enabled: true
+    model: Xenova/ms-marco-MiniLM-L-6-v2
+# Query it once Available:
+#   kubectl port-forward svc/company-docs-retriever 8000:8000
+#   curl -s localhost:8000/query -d '{"query":"how do I create a collection?"}' | jq

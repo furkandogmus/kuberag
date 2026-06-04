@@ -1,0 +1,50 @@
+# Full-RAG example: Gemini embeddings + OpenRouter answer generation.
+#
+# Create the API key secrets first (replace the values):
+#   kubectl create secret generic gemini-key   --from-literal=key=AIza...
+#   kubectl create secret generic openrouter-key --from-literal=key=sk-or-...
+#
+# Embedding providers: local | openai | gemini | openai-compatible
+# Generation providers: openai | openrouter | groq | gemini | openai-compatible
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: rag-docs
+  namespace: default
+spec:
+  sources:
+    - name: readme
+      type: github
+      github:
+        repo: sindresorhus/awesome
+        ref: main
+        includeGlobs: ["*.md"]
+  chunking: { strategy: semantic, maxTokens: 400, overlap: 40 }
+  embedding:
+    provider: gemini
+    model: text-embedding-004        # 768-dim, via Gemini's OpenAI-compatible API
+    apiKeySecretRef: { name: gemini-key, key: key }
+  vectorStore:
+    type: qdrant
+    endpoint: http://qdrant.default.svc.cluster.local:6333
+    collection: rag_docs
+  ingestion: { mode: full }
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: rag-docs
+  namespace: default
+spec:
+  knowledgeBaseRef: { name: rag-docs }
+  topK: 5
+  generation:
+    enabled: true
+    provider: gemini
+    model: "gemini-2.0-flash"
+    apiKeySecretRef: { name: gemini-key, key: key }
+    maxTokens: 512
+# Query once Available (returns {answer, sources}):
+#   kubectl port-forward svc/rag-docs-retriever 8000:8000
+#   curl -s localhost:8000/query -d '{"query":"what awesome lists cover machine learning?"}' | jq

@@ -1,0 +1,19 @@
+# Low-latency retrieval server (deployed by the Retriever controller).
+FROM python:3.12-slim
+
+# gcc/g++ build native wheels (PyStemmer, pulled transitively by fastembed).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements-retriever.txt .
+RUN pip install --no-cache-dir -r requirements-retriever.txt \
+    && apt-get purge -y build-essential && apt-get autoremove -y
+
+# Reuse the worker's store/embedding code.
+COPY rag_worker/ ./rag_worker/
+COPY retriever/ ./retriever/
+
+EXPOSE 8000
+ENTRYPOINT ["uvicorn", "retriever.server:app", "--host", "0.0.0.0", "--port", "8000"]

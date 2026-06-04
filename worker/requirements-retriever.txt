@@ -1,0 +1,9 @@
+fastembed==0.3.6
+qdrant-client==1.11.3
+psycopg[binary]==3.2.1
+pymilvus==2.4.6
+openai==1.40.6
+httpx==0.27.2
+fastapi==0.112.2
+uvicorn==0.30.6
+pydantic==2.8.2

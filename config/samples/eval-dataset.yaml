@@ -1,0 +1,15 @@
+# Evaluation dataset for retrievalQuality. Each line of dataset.jsonl is a query
+# with the doc paths that SHOULD be retrieved. Recall@TopK = fraction of queries
+# for which at least one expected source appears in the retrieved chunks.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: company-docs-eval
+  namespace: default
+data:
+  dataset.jsonl: |
+    {"query": "how do I create a collection?", "expectedSources": ["documentation/concepts/collections"]}
+    {"query": "what distance metrics are supported?", "expectedSources": ["documentation/concepts/search"]}
+    {"query": "how does payload filtering work?", "expectedSources": ["documentation/concepts/filtering"]}
+    {"query": "how to run qdrant with docker?", "expectedSources": ["documentation/guides/installation"]}
+    {"query": "what is a named vector?", "expectedSources": ["documentation/concepts/vectors"]}

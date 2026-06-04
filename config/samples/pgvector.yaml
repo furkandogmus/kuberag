@@ -1,0 +1,59 @@
+# Minimal Postgres + pgvector for local testing. Not for production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgvector
+  labels: { app: pgvector }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: pgvector } }
+  template:
+    metadata: { labels: { app: pgvector } }
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          env:
+            - { name: POSTGRES_PASSWORD, value: postgres }
+            - { name: POSTGRES_DB, value: rag }
+          ports: [{ containerPort: 5432, name: pg }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgvector
+spec:
+  selector: { app: pgvector }
+  ports: [{ name: pg, port: 5432, targetPort: 5432 }]
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: pg-docs
+  namespace: default
+spec:
+  sources:
+    - name: readme
+      type: github
+      github:
+        repo: sindresorhus/awesome
+        ref: main
+        includeGlobs: ["*.md"]
+  chunking: { strategy: semantic, maxTokens: 400, overlap: 40 }
+  embedding: { model: bge-small, provider: local }
+  vectorStore:
+    type: pgvector
+    endpoint: "postgresql://postgres:postgres@pgvector.default.svc.cluster.local:5432/rag"
+    collection: pg_docs
+    distance: cosine
+  ingestion: { mode: full }
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: pg-docs
+  namespace: default
+spec:
+  knowledgeBaseRef: { name: pg-docs }
+  topK: 5
+  replicas: 1
