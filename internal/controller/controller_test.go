@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -323,10 +326,11 @@ func TestSettleOnBest(t *testing.T) {
 
 func TestChunkFingerprint(t *testing.T) {
 	a := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 800, Overlap: 80}
+	aCopy := a
 	b := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkSemantic, MaxTokens: 800, Overlap: 120}
 	// Stable for equal configs, distinct for different ones — this is what keeps a
 	// settle/revert re-index from colliding with the prior attempt's Job name.
-	if chunkFingerprint(a) != chunkFingerprint(a) {
+	if chunkFingerprint(a) != chunkFingerprint(aCopy) {
 		t.Fatal("fingerprint must be stable for equal chunking")
 	}
 	if chunkFingerprint(a) == chunkFingerprint(b) {
@@ -462,6 +466,9 @@ func TestSecurityContextHardening(t *testing.T) {
 	depPodSpec := dep.Spec.Template.Spec
 	if depPodSpec.SecurityContext == nil || depPodSpec.SecurityContext.RunAsNonRoot == nil || !*depPodSpec.SecurityContext.RunAsNonRoot {
 		t.Error("expected Deployment pod security context with RunAsNonRoot=true")
+	}
+	if depPodSpec.AutomountServiceAccountToken == nil || *depPodSpec.AutomountServiceAccountToken {
+		t.Error("expected retriever Deployment to disable ServiceAccount token automount")
 	}
 	if len(depPodSpec.Volumes) != 1 || depPodSpec.Volumes[0].Name != "scratch" {
 		t.Error("expected Deployment pod to have 'scratch' volume")
@@ -629,5 +636,47 @@ func TestInvalidIngestionResourcesReturnError(t *testing.T) {
 
 	if _, err := buildIngestJob(kb, "hash123", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
 		t.Fatal("expected invalid ingestion resources to return an error")
+	}
+}
+
+func TestQdrantProbeUsesCredentialSecret(t *testing.T) {
+	const apiKey = "qdrant-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.Header.Get("api-key"); got != apiKey {
+			http.Error(w, fmt.Sprintf("unexpected api-key %q", got), http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"green","result":{"points_count":12,"config":{"params":{"vectors":{"size":384}}}}}`)
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "qdrant-auth", Namespace: "default"},
+		Data:       map[string][]byte{"api-key": []byte(apiKey)},
+	}
+	r := &VectorIndexReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+		HTTP:   server.Client(),
+	}
+	vi := &ragv1alpha1.VectorIndex{
+		ObjectMeta: metav1.ObjectMeta{Name: "docs-index", Namespace: "default"},
+		Spec: ragv1alpha1.VectorIndexSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: "docs"},
+			Store: ragv1alpha1.VectorStoreSpec{
+				Type:                 ragv1alpha1.VectorStoreQdrant,
+				Endpoint:             server.URL,
+				Collection:           "docs",
+				CredentialsSecretRef: &ragv1alpha1.SecretKeyRef{Name: "qdrant-auth", Key: "api-key"},
+			},
+			Dimension: 384,
+		},
+	}
+
+	got := r.probeQdrant(context.Background(), vi)
+	if got.health != ragv1alpha1.IndexHealthy || got.points != 12 || got.dimension != 384 {
+		t.Fatalf("unexpected authenticated Qdrant probe result: %+v", got)
 	}
 }

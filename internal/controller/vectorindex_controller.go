@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -115,6 +117,24 @@ func (r *VectorIndexReconciler) probeQdrant(ctx context.Context, vi *ragv1alpha1
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return probeResult{health: ragv1alpha1.IndexUnknown, message: err.Error()}
+	}
+	if ref := vi.Spec.Store.CredentialsSecretRef; ref != nil {
+		var secret corev1.Secret
+		key := types.NamespacedName{Namespace: vi.Namespace, Name: ref.Name}
+		if err := r.Get(ctx, key, &secret); err != nil {
+			return probeResult{
+				health:  ragv1alpha1.IndexUnknown,
+				message: fmt.Sprintf("could not read Qdrant credential secret %s: %v", ref.Name, err),
+			}
+		}
+		apiKey, ok := secret.Data[ref.Key]
+		if !ok {
+			return probeResult{
+				health:  ragv1alpha1.IndexUnknown,
+				message: fmt.Sprintf("Qdrant credential secret %s is missing key %s", ref.Name, ref.Key),
+			}
+		}
+		httpReq.Header.Set("api-key", string(apiKey))
 	}
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -207,11 +208,12 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 					},
 				},
 				Spec: corev1.PodSpec{
-					SecurityContext: hardenedPodSecurityContext(),
-					Volumes:         []corev1.Volume{scratchVolume()},
-					NodeSelector:    rt.Spec.NodeSelector,
-					Tolerations:     rt.Spec.Tolerations,
-					Affinity:        rt.Spec.Affinity,
+					AutomountServiceAccountToken: ptr.To(false),
+					SecurityContext:              hardenedPodSecurityContext(),
+					Volumes:                      []corev1.Volume{scratchVolume()},
+					NodeSelector:                 rt.Spec.NodeSelector,
+					Tolerations:                  rt.Spec.Tolerations,
+					Affinity:                     rt.Spec.Affinity,
 					Containers: []corev1.Container{
 						{
 							Name:            "retriever",
