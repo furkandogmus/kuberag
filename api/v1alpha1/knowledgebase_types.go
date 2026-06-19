@@ -78,6 +78,8 @@ type S3Source struct {
 // WebSource crawls one or more seed URLs.
 type WebSource struct {
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:items:Pattern=`^https?://`
 	URLs []string `json:"urls"`
 	// MaxDepth bounds link-following from each seed. 0 means only the seed pages.
 	// +kubebuilder:default=1
@@ -90,6 +92,7 @@ type WebSource struct {
 	SameDomainOnly *bool `json:"sameDomainOnly,omitempty"`
 	// MaxPages caps the total number of fetched pages.
 	// +kubebuilder:default=200
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxPages int `json:"maxPages,omitempty"`
 }

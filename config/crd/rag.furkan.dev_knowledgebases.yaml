@@ -1288,6 +1288,7 @@ spec:
                         maxPages:
                           default: 200
                           description: MaxPages caps the total number of fetched pages.
+                          minimum: 1
                           type: integer
                         sameDomainOnly:
                           default: true
@@ -1296,7 +1297,9 @@ spec:
                           type: boolean
                         urls:
                           items:
+                            pattern: ^https?://
                             type: string
+                          maxItems: 20
                           minItems: 1
                           type: array
                       required:

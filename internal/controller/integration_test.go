@@ -123,6 +123,24 @@ func sampleKB(ns, name string) *ragv1alpha1.KnowledgeBase {
 	}
 }
 
+func TestWebSourceAdmissionValidation(t *testing.T) {
+	ns := newNamespace(t)
+	kb := sampleKB(ns, "invalid-web-source")
+	kb.Spec.Sources = []ragv1alpha1.Source{{
+		Name: "site",
+		Type: ragv1alpha1.SourceWeb,
+		Web: &ragv1alpha1.WebSource{
+			URLs:     []string{"ftp://example.com/docs"},
+			MaxPages: -1,
+		},
+	}}
+
+	err := k8sClient.Create(testCtx, kb)
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("expected invalid web source to be rejected by CRD validation, got %v", err)
+	}
+}
+
 // completeJob marks a Job complete and writes the worker result ConfigMap the
 // operator reads (envtest has no job controller, so we drive this ourselves).
 func completeJob(t *testing.T, ns, jobName, resultJSON string) {

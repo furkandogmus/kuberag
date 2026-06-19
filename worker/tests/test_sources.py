@@ -6,7 +6,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from rag_worker.sources import _read_pdf, _read_pdf_bytes
+from rag_worker.sources import (
+    _normalize_web_url,
+    _parse_html,
+    _read_pdf,
+    _read_pdf_bytes,
+    fetch_web,
+)
 
 
 class TestSources(unittest.TestCase):
@@ -46,6 +52,116 @@ class TestSources(unittest.TestCase):
         import io
         self.assertIsInstance(args[0], io.BytesIO)
         self.assertEqual(args[0].getvalue(), b"dummy bytes")
+
+    def test_parse_html_extracts_visible_text_links_and_base(self):
+        text, links, base_href = _parse_html(
+            """
+            <html><head><base href="/docs/"><style>hidden css</style></head>
+            <body><h1>RAG &amp; Kubernetes</h1>
+            <script>hidden script</script><a href="guide.html#intro">Guide</a></body></html>
+            """
+        )
+
+        self.assertEqual(text, "RAG & Kubernetes Guide")
+        self.assertEqual(links, ["guide.html#intro"])
+        self.assertEqual(base_href, "/docs/")
+
+    def test_normalize_web_url_removes_fragment_userinfo_and_default_port(self):
+        self.assertEqual(
+            _normalize_web_url("HTTPS://user:pass@Example.COM:443/docs?q=1#section"),
+            "https://example.com/docs?q=1",
+        )
+        self.assertIsNone(_normalize_web_url("javascript:alert(1)"))
+
+    @patch("requests.get")
+    def test_fetch_web_normalizes_and_deduplicates_links(self, mock_get):
+        first = MagicMock(
+            status_code=200,
+            url="https://example.com/start",
+            text=(
+                '<base href="/docs/"><h1>Start</h1>'
+                '<a href="guide.html#one">one</a>'
+                '<a href="https://EXAMPLE.com:443/docs/guide.html#two">two</a>'
+                '<a href="https://other.example/out">external</a>'
+            ),
+        )
+        first.headers = {"content-type": "text/html; charset=utf-8"}
+        second = MagicMock(
+            status_code=200,
+            url="https://example.com/docs/guide.html",
+            text="<h1>Guide</h1>",
+        )
+        second.headers = {"content-type": "text/html"}
+        mock_get.side_effect = [first, second]
+
+        result = fetch_web({
+            "name": "site",
+            "type": "web",
+            "web": {
+                "urls": ["https://EXAMPLE.com:443/start#top"],
+                "maxDepth": 1,
+                "sameDomainOnly": True,
+                "maxPages": 10,
+            },
+        })
+
+        self.assertEqual(
+            result.docs,
+            [
+                ("https://example.com/start", "Start one two external"),
+                ("https://example.com/docs/guide.html", "Guide"),
+            ],
+        )
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch("requests.get")
+    def test_fetch_web_rejects_cross_domain_redirect(self, mock_get):
+        response = MagicMock(
+            status_code=200,
+            url="https://other.example/redirected",
+            text="<h1>Other site</h1>",
+        )
+        response.headers = {"content-type": "text/html"}
+        mock_get.return_value = response
+
+        result = fetch_web({
+            "name": "site",
+            "type": "web",
+            "web": {
+                "urls": ["https://example.com/start"],
+                "maxDepth": 0,
+                "sameDomainOnly": True,
+                "maxPages": 10,
+            },
+        })
+
+        self.assertEqual(result.docs, [])
+
+    @patch("requests.get")
+    def test_fetch_web_max_pages_limits_requests_not_only_documents(self, mock_get):
+        first = MagicMock(
+            status_code=200,
+            url="https://example.com/",
+            text='<h1>Home</h1><a href="/empty">Empty</a><a href="/never">Never</a>',
+        )
+        first.headers = {"content-type": "text/html"}
+        empty = MagicMock(status_code=200, url="https://example.com/empty", text="<script>empty</script>")
+        empty.headers = {"content-type": "text/html"}
+        mock_get.side_effect = [first, empty]
+
+        result = fetch_web({
+            "name": "site",
+            "type": "web",
+            "web": {
+                "urls": ["https://example.com/"],
+                "maxDepth": 1,
+                "sameDomainOnly": True,
+                "maxPages": 2,
+            },
+        })
+
+        self.assertEqual(result.docs, [("https://example.com/", "Home Empty Never")])
+        self.assertEqual(mock_get.call_count, 2)
 
 
 if __name__ == "__main__":

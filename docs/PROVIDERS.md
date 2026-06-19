@@ -6,10 +6,15 @@
 |------|--------|--------------------|-------|
 | `github` | `repo`, `ref`, `includeGlobs[]`, `tokenSecretRef` | commit SHA (`git ls-remote`) | Blobless + sparse clone: only matching paths are fetched. |
 | `s3` | `bucket`, `prefix`, `region`, `endpoint`, `includeGlobs[]`, key secrets | sorted object ETags hash | Works with AWS S3 and S3-compatible stores (MinIO) via path-style addressing. |
-| `web` | `urls[]`, `maxDepth`, `sameDomainOnly`, `maxPages` | crawl content hash | Depth-bounded crawler; strips HTML to text. |
+| `web` | `urls[]`, `maxDepth`, `sameDomainOnly`, `maxPages` | crawl content hash | Bounded static-HTML crawler; normalizes URLs, deduplicates links, enforces redirect domains, and strips HTML to text. |
 
 `includeGlobs` are gitignore-style with real `**` semantics (`docs/**/*.md`
 matches nested *and* top-level). Empty globs fall back to known text extensions.
+
+The web source is intended for documentation sites that render useful content
+in the initial HTML response. It does not execute JavaScript or act as a
+general-purpose browser crawler. `maxPages` is a fetch budget, so error pages and
+empty responses cannot cause an unbounded crawl.
 
 ## Vector stores
 

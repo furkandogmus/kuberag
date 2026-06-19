@@ -8,6 +8,7 @@ import re
 import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 
 TEXT_EXTS = {".md", ".mdx", ".txt", ".rst", ".html", ".htm", ".pdf"}
@@ -227,14 +228,71 @@ def fetch_s3(src: dict, dest: Path) -> SourceDocs:
 # --------------------------------------------------------------------------- #
 # Web crawl
 # --------------------------------------------------------------------------- #
-_TAG_RE = re.compile(r"<[^>]+>")
-_HREF_RE = re.compile(r'href=["\']([^"\'#]+)', re.IGNORECASE)
+class _HTMLPageParser(HTMLParser):
+    """Extract visible text and crawlable links without an HTML dependency."""
+
+    _SKIP_TAGS = {"script", "style", "noscript", "template"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.text_parts: list[str] = []
+        self.links: list[str] = []
+        self.base_href: str | None = None
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        values = dict(attrs)
+        if tag == "a" and values.get("href"):
+            self.links.append(values["href"])
+        elif tag == "base" and self.base_href is None and values.get("href"):
+            self.base_href = values["href"]
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0 and data.strip():
+            self.text_parts.append(data)
+
+
+def _parse_html(html: str) -> tuple[str, list[str], str | None]:
+    parser = _HTMLPageParser()
+    parser.feed(html)
+    parser.close()
+    text = re.sub(r"\s+", " ", " ".join(parser.text_parts)).strip()
+    return text, parser.links, parser.base_href
 
 
 def _strip_html(html: str) -> str:
-    html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
-    text = _TAG_RE.sub(" ", html)
-    return re.sub(r"\s+", " ", text).strip()
+    text, _, _ = _parse_html(html)
+    return text
+
+
+def _normalize_web_url(url: str) -> str | None:
+    """Return a stable HTTP(S) URL without fragments or userinfo."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+
+    display_host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    netloc = display_host if port is None or default_port else f"{display_host}:{port}"
+    return urllib.parse.urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, ""))
+
+
+def _web_hostname(url: str) -> str:
+    return (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
 
 
 def fetch_web(src: dict) -> SourceDocs:
@@ -246,30 +304,54 @@ def fetch_web(src: dict) -> SourceDocs:
     same_domain = web.get("sameDomainOnly", True)
     max_pages = web.get("maxPages", 200)
 
+    normalized_seeds = [url for seed in seeds if (url := _normalize_web_url(seed)) is not None]
     seen: set[str] = set()
-    queue: list[tuple[str, int]] = [(u, 0) for u in seeds]
-    seed_domains = {urllib.parse.urlparse(u).netloc for u in seeds}
+    queued: set[str] = set(normalized_seeds)
+    indexed: set[str] = set()
+    queue: list[tuple[str, int]] = [(url, 0) for url in normalized_seeds]
+    seed_domains = {_web_hostname(url) for url in normalized_seeds}
     docs: list[tuple[str, str]] = []
+    fetched_pages = 0
 
-    while queue and len(docs) < max_pages:
+    while queue and fetched_pages < max_pages:
         url, depth = queue.pop(0)
+        queued.discard(url)
         if url in seen:
             continue
         seen.add(url)
+        fetched_pages += 1
         try:
             resp = requests.get(url, timeout=15, headers={"User-Agent": "kuberag/1.0"})
         except requests.RequestException:
             continue
         if resp.status_code != 200 or "text/html" not in resp.headers.get("content-type", ""):
             continue
-        docs.append((url, _strip_html(resp.text)))
+
+        final_url = _normalize_web_url(resp.url)
+        if final_url is None:
+            continue
+        if same_domain and _web_hostname(final_url) not in seed_domains:
+            continue
+        if final_url in indexed:
+            continue
+
+        text, links, base_href = _parse_html(resp.text)
+        if not text:
+            continue
+        docs.append((final_url, text))
+        indexed.add(final_url)
+
         if depth < max_depth:
-            for href in _HREF_RE.findall(resp.text):
-                nxt = urllib.parse.urljoin(url, href)
-                if same_domain and urllib.parse.urlparse(nxt).netloc not in seed_domains:
+            link_base = urllib.parse.urljoin(final_url, base_href) if base_href else final_url
+            for href in links:
+                nxt = _normalize_web_url(urllib.parse.urljoin(link_base, href))
+                if nxt is None:
                     continue
-                if nxt.startswith("http") and nxt not in seen:
+                if same_domain and _web_hostname(nxt) not in seed_domains:
+                    continue
+                if nxt not in seen and nxt not in queued:
                     queue.append((nxt, depth + 1))
+                    queued.add(nxt)
 
     revision = _hash(*[f"{u}:{_hash(t)}" for u, t in sorted(docs)])
     return SourceDocs(revision=revision, docs=docs)
