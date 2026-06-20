@@ -30,33 +30,31 @@ def run() -> None:
 
 
 def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
-    """Atomic full ingest: shadow collection → verify → promote."""
-    collection = spec["vectorStore"].get("collection") or os.environ["KB_NAME"]
-    shadow_name = f"{collection}-next"
+    """Atomic full ingest: versioned shadow → verify → promote via alias."""
+    store = make_store(spec)
+    round_num = int(os.environ.get("INGEST_ROUND", "1"))
 
-    # Create shadow store pointed at the shadow collection.
+    # Create versioned physical shadow (no alias yet — data not verified).
+    shadow_name = store.create_physical(embedder.dim, distance, round_num)
     shadow_spec = {**spec, "vectorStore": {**spec["vectorStore"], "collection": shadow_name}}
     shadow_store = make_store(shadow_spec)
-    shadow_store.recreate_collection(embedder.dim, distance)
+    shadow_store._ensure_payload_indexes()
 
-    prior = prior_sources()
-    source_results: list[dict] = []
     total = 0
-
+    source_results: list[dict] = []
     try:
         with tempfile.TemporaryDirectory() as tmp:
             for i, src in enumerate(spec["sources"]):
                 name = src["name"]
-                log(f"full ingest: fetching source '{name}' (type={src['type']})")
+                log(f"full ingest: fetching source '{name}'")
                 dest = Path(tmp) / f"src-{i}"
                 sd = sources.fetch(src, dest)
                 points = _iter_points(name, sd, strategy, max_tokens, overlap)
                 count = _embed_and_upsert(embedder, shadow_store, points)
                 source_results.append({"name": name, "revision": sd.revision, "chunks": count})
-                log(f"source '{name}': indexed {count} chunks into shadow {shadow_name}")
+                log(f"source '{name}': indexed {count} chunks into {shadow_name}")
                 total += count
 
-        # Verify: must have ingested at least some data.
         shadow_count = shadow_store.count()
         if shadow_count < total:
             shadow_count = total
@@ -65,16 +63,14 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
             shadow_store.close()
             raise RuntimeError("full ingest produced 0 chunks — active collection preserved")
 
-        # Atomically promote the shadow.
-        store = make_store(spec)
+        # Promote: point alias to verified shadow.
         swapped = store.swap_collection(shadow_name)
         if not swapped:
-            # Fallback: non-atomic recreate into the live collection.
-            log(f"WARNING: store does not support atomic swap; falling back to recreate")
+            log("WARNING: store does not support atomic swap; recreating inline")
             store.recreate_collection(embedder.dim, distance)
             _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results)
         else:
-            log(f"atomic swap: {shadow_name} → {collection} promoted")
+            log(f"atomic swap: alias → {shadow_name} promoted")
 
         shadow_store.close()
 
@@ -86,8 +82,7 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
         store.close()
 
     except Exception:
-        # Ingestion failed — drop the shadow, keep the active collection intact.
-        log("ERROR: full ingest failed; dropping shadow collection, active collection preserved")
+        log("ERROR: full ingest failed; dropping shadow, active collection preserved")
         try:
             shadow_store.drop()
         except Exception:

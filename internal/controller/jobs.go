@@ -259,6 +259,7 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1
 		kb.Name, kb.Status.IngestRound, kb.Status.AutoTuneAttempts, chunkFingerprint(effChunking), hash))
 	env := []corev1.EnvVar{
 		{Name: "INGEST_MODE", Value: string(mode)},
+		{Name: "INGEST_ROUND", Value: fmt.Sprintf("%d", kb.Status.IngestRound)},
 		{Name: "PRIOR_SOURCES_JSON", Value: priorSourcesJSON(kb)},
 	}
 	job, err := baseJob(kb, name, jobTypeIngest, hash, specConfigMapName(name), []string{"ingest"}, env)

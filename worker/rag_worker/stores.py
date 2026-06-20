@@ -61,6 +61,10 @@ class VectorStore(ABC):
         """
         return False  # default: not supported
 
+    def create_physical(self, dim: int, distance: str, round_num: int) -> str:
+        """Create a versioned physical collection. Returns the physical name."""
+        return f"{self.collection}-v{round_num}"
+
     def close(self) -> None:
         pass
 
@@ -101,26 +105,78 @@ class QdrantStore(VectorStore):
         }[self.distance]
 
     def _exists(self) -> bool:
+        # Also resolve aliases — collection_exists returns True for aliases.
         return self.client.collection_exists(self.collection)
+
+    def _physical_name(self, version: int) -> str:
+        return f"{self.collection}-v{version}"
+
+    def _ensure_alias(self, physical: str) -> None:
+        """Create alias self.collection → physical if it doesn't already exist."""
+        from qdrant_client import models
+        try:
+            self.client.update_collection_aliases(
+                change_aliases_operations=[
+                    models.CreateAliasOperation(
+                        create_alias=models.CreateAlias(
+                            collection_name=physical,
+                            alias_name=self.collection,
+                        )
+                    )
+                ]
+            )
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                raise
 
     def ensure_collection(self, dim: int, distance: str) -> None:
         from qdrant_client import models
 
-        if not self._exists():
-            self.client.create_collection(
-                collection_name=self.collection,
-                vectors_config=models.VectorParams(size=dim, distance=self._distance()),
-            )
+        if self._exists():
+            # Alias or physical exists — verify dimension matches.
+            try:
+                info = self.client.get_collection(self.collection)
+                if info.config.params.vectors.size != dim:
+                    self.recreate_collection(dim, distance)
+                    return
+            except Exception:
+                pass
+            self._ensure_payload_indexes()
+            return
+
+        # Nothing exists. Create v1 physical + alias.
+        v1 = self._physical_name(1)
+        self.client.create_collection(
+            collection_name=v1,
+            vectors_config=models.VectorParams(size=dim, distance=self._distance()),
+        )
+        self._ensure_alias(v1)
         self._ensure_payload_indexes()
 
     def recreate_collection(self, dim: int, distance: str) -> None:
+        """Create a new physical collection and point the alias at it."""
         from qdrant_client import models
 
+        round_num = int(os.environ.get("INGEST_ROUND", "1"))
+        physical = self._physical_name(round_num)
         self.client.recreate_collection(
-            collection_name=self.collection,
+            collection_name=physical,
             vectors_config=models.VectorParams(size=dim, distance=self._distance()),
         )
+        self._ensure_alias(physical)
         self._ensure_payload_indexes()
+
+    def create_physical(self, dim: int, distance: str, round_num: int) -> str:
+        """Create a versioned physical collection without pointing the alias.
+        Returns the physical collection name for later swap_collection."""
+        from qdrant_client import models
+
+        physical = self._physical_name(round_num)
+        self.client.recreate_collection(
+            collection_name=physical,
+            vectors_config=models.VectorParams(size=dim, distance=self._distance()),
+        )
+        return physical
 
     def _ensure_payload_indexes(self) -> None:
         from qdrant_client import models
