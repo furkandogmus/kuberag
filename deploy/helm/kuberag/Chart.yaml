@@ -1,0 +1,18 @@
+apiVersion: v2
+name: kuberag
+description: Kubernetes-native RAG lifecycle operator — declarative knowledge bases with auto-tuning, hybrid search, and LLM generation.
+type: application
+version: 0.1.0
+appVersion: "v1alpha1"
+keywords:
+  - rag
+  - retrieval-augmented-generation
+  - embeddings
+  - vector-database
+  - kubernetes-operator
+home: https://github.com/furkandogmus/kuberag
+sources:
+  - https://github.com/furkandogmus/kuberag
+maintainers:
+  - name: furkandogmus
+    url: https://github.com/furkandogmus

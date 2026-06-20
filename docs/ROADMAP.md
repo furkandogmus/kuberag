@@ -15,12 +15,11 @@ welcome.
 - Reranking (cross-encoder), metadata filtering (source, docPath)
 - In-cluster deploy, leader election, RBAC, events, Prometheus metrics + Grafana
 - CI (unit + envtest integration + e2e + lint) and multi-arch (amd64/arm64) images
-- NetworkPolicy, PriorityClass, Kustomize bootstrap
+- NetworkPolicy, PriorityClass, Helm chart, Kustomize bootstrap
+- Health probing for Qdrant (collection-level), pgvector (table + count), Milvus (health + describe)
 
 ## Near term
 
-- **Helm chart** for install (currently raw manifests + Kustomize base).
-- **Health probing for pgvector and Milvus** (today only Qdrant is probed).
 - **Validating/defaulting webhooks** (today: CEL validation only).
 - **Incremental at file granularity** (skip is per-source; could diff changed files).
 - **More sources**: Confluence/Notion, generic Git (non-GitHub), local PVC.

@@ -2,10 +2,14 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -79,6 +83,10 @@ func (r *VectorIndexReconciler) probe(ctx context.Context, vi *ragv1alpha1.Vecto
 	switch vi.Spec.Store.Type {
 	case ragv1alpha1.VectorStoreQdrant:
 		return r.probeQdrant(ctx, vi)
+	case ragv1alpha1.VectorStorePgVector:
+		return r.probePgvector(ctx, vi)
+	case ragv1alpha1.VectorStoreMilvus:
+		return r.probeMilvus(ctx, vi)
 	default:
 		return probeResult{
 			health:  ragv1alpha1.IndexUnknown,
@@ -171,6 +179,147 @@ func (r *VectorIndexReconciler) probeQdrant(ctx context.Context, vi *ragv1alpha1
 		res.message = fmt.Sprintf("dimension mismatch: store=%d expected=%d", dim, vi.Spec.Dimension)
 	}
 	return res
+}
+
+func (r *VectorIndexReconciler) probePgvector(ctx context.Context, vi *ragv1alpha1.VectorIndex) probeResult {
+	collection := vi.Spec.Store.Collection
+	if collection == "" {
+		collection = vi.Spec.KnowledgeBaseRef.Name
+	}
+	dsn := vi.Spec.Store.Endpoint
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return probeResult{health: ragv1alpha1.IndexUnknown, message: fmt.Sprintf("pgvector: invalid DSN: %v", err)}
+	}
+	defer db.Close()
+
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(dbCtx); err != nil {
+		return probeResult{health: ragv1alpha1.IndexDegraded, message: fmt.Sprintf("pgvector: unreachable: %v", err)}
+	}
+
+	var exists bool
+	if err := db.QueryRowContext(dbCtx,
+		"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)", collection,
+	).Scan(&exists); err != nil || !exists {
+		return probeResult{health: ragv1alpha1.IndexMissing, message: fmt.Sprintf("pgvector: table %q does not exist", collection)}
+	}
+
+	var count int64
+	if err := db.QueryRowContext(dbCtx,
+		fmt.Sprintf("SELECT count(*) FROM %s", collection),
+	).Scan(&count); err != nil {
+		return probeResult{health: ragv1alpha1.IndexDegraded, message: fmt.Sprintf("pgvector: count query failed: %v", err)}
+	}
+
+	return probeResult{
+		health:    ragv1alpha1.IndexHealthy,
+		points:    count,
+		dimension: vi.Spec.Dimension,
+		message:   fmt.Sprintf("table %s exists, %d points", collection, count),
+	}
+}
+
+// milvusCollectionResponse mirrors the subset of Milvus REST API collection info.
+type milvusCollectionResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		CollectionName string `json:"collection_name"`
+		NumEntities    int64  `json:"num_entities"`
+	} `json:"data"`
+}
+
+func (r *VectorIndexReconciler) probeMilvus(ctx context.Context, vi *ragv1alpha1.VectorIndex) probeResult {
+	collection := vi.Spec.Store.Collection
+	if collection == "" {
+		collection = vi.Spec.KnowledgeBaseRef.Name
+	}
+
+	endpoint := vi.Spec.Store.Endpoint
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" {
+		endpoint = "http://" + endpoint
+		parsed, _ = url.Parse(endpoint)
+	}
+
+	// Milvus serves a health endpoint; the collection describe API may vary.
+	healthURL := fmt.Sprintf("%s/health", endpoint)
+	httpClient := r.HTTP
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return probeResult{health: ragv1alpha1.IndexUnknown, message: err.Error()}
+	}
+
+	if ref := vi.Spec.Store.CredentialsSecretRef; ref != nil {
+		var secret corev1.Secret
+		key := types.NamespacedName{Namespace: vi.Namespace, Name: ref.Name}
+		if err := r.Get(ctx, key, &secret); err != nil {
+			return probeResult{health: ragv1alpha1.IndexUnknown, message: fmt.Sprintf("could not read Milvus credential secret %s: %v", ref.Name, err)}
+		}
+		if token, ok := secret.Data[ref.Key]; ok {
+			httpReq.Header.Set("Authorization", "Bearer "+string(token))
+		}
+	}
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return probeResult{health: ragv1alpha1.IndexDegraded, message: fmt.Sprintf("milvus: unreachable: %v", err)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 500 {
+		return probeResult{health: ragv1alpha1.IndexDegraded, message: fmt.Sprintf("milvus: health endpoint returned %d", resp.StatusCode)}
+	}
+
+	// Try the describe-collection API to get entity count.
+	describeURL := fmt.Sprintf("%s/v2/vectordb/collections/describe?collectionName=%s", endpoint, collection)
+	describeReq, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, describeURL, nil)
+	if ref := vi.Spec.Store.CredentialsSecretRef; ref != nil {
+		if secret, err := func() (*corev1.Secret, error) {
+			var s corev1.Secret
+			if err := r.Get(ctx, types.NamespacedName{Namespace: vi.Namespace, Name: ref.Name}, &s); err != nil {
+				return nil, err
+			}
+			return &s, nil
+		}(); err == nil && secret != nil {
+			if token, ok := secret.Data[ref.Key]; ok {
+				describeReq.Header.Set("Authorization", "Bearer "+string(token))
+			}
+		}
+	}
+
+	dResp, dErr := httpClient.Do(describeReq)
+	if dErr == nil {
+		defer func() { _ = dResp.Body.Close() }()
+		if dResp.StatusCode == http.StatusOK {
+			var body milvusCollectionResponse
+			if json.NewDecoder(dResp.Body).Decode(&body) == nil && body.Code == 0 && body.Data.CollectionName != "" {
+				return probeResult{
+					health:    ragv1alpha1.IndexHealthy,
+					points:    body.Data.NumEntities,
+					dimension: vi.Spec.Dimension,
+					message:   fmt.Sprintf("collection %s, %d entities", body.Data.CollectionName, body.Data.NumEntities),
+				}
+			}
+		}
+	}
+
+	return probeResult{
+		health:    ragv1alpha1.IndexHealthy,
+		points:    -1,
+		dimension: vi.Spec.Dimension,
+		message:   fmt.Sprintf("milvus service reachable; collection detail unavailable via REST (collection=%s)", collection),
+	}
 }
 
 func (r *VectorIndexReconciler) SetupWithManager(mgr ctrl.Manager) error {

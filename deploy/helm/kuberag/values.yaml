@@ -1,0 +1,88 @@
+# Default values for kuberag.
+# Declare variables to be passed into your templates.
+
+# -- Number of operator replicas (leader-elected, keep at 1).
+replicaCount: 1
+
+image:
+  repository: ghcr.io/furkandogmus/kuberag
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Operator resource requests and limits.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# -- Controller arguments.
+args:
+  - --leader-elect
+  - --metrics-bind-address=:8080
+  - --health-probe-bind-address=:8081
+
+# Metrics service.
+metrics:
+  service:
+    port: 8080
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+
+# Leader election configuration.
+leaderElection:
+  enabled: true
+
+# PriorityClass configuration.
+priorityClass:
+  enabled: true
+  name: kuberag-system
+  value: 1000000
+
+# NetworkPolicy configuration.
+networkPolicy:
+  enabled: false
+
+# RBAC configuration.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: kuberag-controller-manager
+
+# Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Pod annotations and labels.
+podAnnotations: {}
+podLabels: {}
+
+# Node selector, tolerations, and affinity for the operator pod.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Termination grace period.
+terminationGracePeriodSeconds: 60
