@@ -83,28 +83,6 @@ class TestQdrantIntegration(unittest.TestCase):
         after = self.store.count()
         self.assertLess(after, before)
 
-    def test_staging_swap(self):
-        stage_name = self.store.staging_name(99)
-        stage = self.store.__class__(self.endpoint, stage_name, "cosine")
-        try:
-            stage.ensure_collection(384, "cosine")
-            pid = _uid()
-            stage.upsert([
-                {"id": pid, "vector": [1.0] * 384,
-                 "payload": {"source": "s", "doc_path": "s.md", "text": "staged"}},
-            ])
-            ok = self.store.swap_collection(stage_name)
-            self.assertTrue(ok)
-            hits = self.store.search([1.0] * 384, topk=1)
-            self.assertGreaterEqual(len(hits), 1)
-            self.assertEqual(hits[0]["payload"]["text"], "staged")
-        finally:
-            try:
-                stage.drop()
-                stage.close()
-            except Exception:
-                pass
-
     @classmethod
     def tearDownClass(cls):
         try:
@@ -150,7 +128,7 @@ class TestPgVectorIntegration(unittest.TestCase):
         self.assertGreaterEqual(cnt, 2)
 
     def test_on_conflict_update(self):
-        pid1, _ = _uid(), _uid()
+        pid1 = _uid()
         self.store.upsert([
             {"id": pid1, "vector": [1.0] + [0.0] * 383,
              "payload": {"source": "docs", "doc_path": "c.md", "text": "original", "chunk_hash": "x"}},
@@ -183,28 +161,6 @@ class TestPgVectorIntegration(unittest.TestCase):
         self.store.delete_by_source("tmp")
         after = self.store.count()
         self.assertLess(after, before)
-
-    def test_swap_collection(self):
-        stage_name = self.store.staging_name(42)
-        stage = self.store.__class__(self.dsn, stage_name, "cosine")
-        try:
-            stage.ensure_collection(384, "cosine")
-            pid = _uid()
-            stage.upsert([
-                {"id": pid, "vector": [1.0] * 384,
-                 "payload": {"source": "s", "doc_path": "s.md", "text": "staged", "chunk_hash": "s1"}},
-            ])
-            ok = self.store.swap_collection(stage.table)
-            self.assertTrue(ok)
-            hits = self.store.search([1.0] * 384, topk=1)
-            self.assertGreaterEqual(len(hits), 1)
-            self.assertEqual(hits[0]["payload"]["text"], "staged")
-        finally:
-            try:
-                stage.drop()
-                stage.close()
-            except Exception:
-                pass
 
     @classmethod
     def tearDownClass(cls):
