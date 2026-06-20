@@ -12,6 +12,11 @@ on:
       - "**.md"
       - "docs/**"
       - "config/samples/**"
+      - "config/crd/**"
+      - "config/rbac/role.yaml"
+      - "config/observability/**"
+      - "deploy/**"
+      - "hack/**"
       - ".github/ISSUE_TEMPLATE/**"
       - "LICENSE"
 

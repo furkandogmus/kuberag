@@ -12,8 +12,8 @@ RUN pip install --no-cache-dir -r requirements-retriever.txt \
     && apt-get purge -y build-essential && apt-get autoremove -y
 
 # Reuse the worker's store/embedding code.
-COPY rag_worker/ ./rag_worker/
-COPY retriever/ ./retriever/
+COPY --chown=65532:65532 rag_worker/ ./rag_worker/
+COPY --chown=65532:65532 retriever/ ./retriever/
 
 EXPOSE 8000
 USER 65532:65532

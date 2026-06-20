@@ -243,20 +243,20 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 					},
 				},
 				Spec: corev1.PodSpec{
-					AutomountServiceAccountToken: ptr.To(false),
-					PriorityClassName:            "kuberag-system",
+					AutomountServiceAccountToken:  ptr.To(false),
+					PriorityClassName:             "kuberag-system",
 					TerminationGracePeriodSeconds: ptr.To(int64(60)),
-					SecurityContext:              hardenedPodSecurityContext(),
-					Volumes:                      []corev1.Volume{scratchVolume()},
-					NodeSelector:                 rt.Spec.NodeSelector,
-					Tolerations:                  rt.Spec.Tolerations,
-					Affinity:                     rt.Spec.Affinity,
+					SecurityContext:               hardenedPodSecurityContext(),
+					Volumes:                       []corev1.Volume{scratchVolume()},
+					NodeSelector:                  rt.Spec.NodeSelector,
+					Tolerations:                   rt.Spec.Tolerations,
+					Affinity:                      rt.Spec.Affinity,
 					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
 						{
 							MaxSkew:           1,
 							TopologyKey:       "topology.kubernetes.io/zone",
 							WhenUnsatisfiable: corev1.ScheduleAnyway,
-							LabelSelector:      &metav1.LabelSelector{MatchLabels: labels},
+							LabelSelector:     &metav1.LabelSelector{MatchLabels: labels},
 						},
 					},
 					Containers: []corev1.Container{

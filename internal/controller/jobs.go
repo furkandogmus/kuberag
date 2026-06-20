@@ -227,10 +227,10 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, specCMName
 					PriorityClassName:             "kuberag-system",
 					TerminationGracePeriodSeconds: ptr.To(int64(120)),
 					SecurityContext:               hardenedPodSecurityContext(),
-					Volumes:            []corev1.Volume{scratchVolume(), specVolume(specCMName)},
-					NodeSelector:       kb.Spec.Ingestion.NodeSelector,
-					Tolerations:        kb.Spec.Ingestion.Tolerations,
-					Affinity:           kb.Spec.Ingestion.Affinity,
+					Volumes:                       []corev1.Volume{scratchVolume(), specVolume(specCMName)},
+					NodeSelector:                  kb.Spec.Ingestion.NodeSelector,
+					Tolerations:                   kb.Spec.Ingestion.Tolerations,
+					Affinity:                      kb.Spec.Ingestion.Affinity,
 					Containers: []corev1.Container{
 						{
 							Name:            "worker",

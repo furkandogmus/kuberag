@@ -228,7 +228,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		return ctrl.Result{}, true, err
 	}
 	r.deleteResult(ctx, kb.Namespace, job.Name)
-		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
@@ -321,7 +321,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 				return ctrl.Result{}, true, err
 			}
 			r.deleteResult(ctx, kb.Namespace, job.Name)
-		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+			r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 			return ctrl.Result{Requeue: true}, true, nil
 		}
 
@@ -339,7 +339,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 				return ctrl.Result{}, true, err
 			}
 			r.deleteResult(ctx, kb.Namespace, job.Name)
-		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+			r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 			return ctrl.Result{Requeue: true}, true, nil
 		}
 	}
@@ -356,7 +356,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		return ctrl.Result{}, true, err
 	}
 	r.deleteResult(ctx, kb.Namespace, job.Name)
-		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	return ctrl.Result{Requeue: true}, true, nil
 }
 

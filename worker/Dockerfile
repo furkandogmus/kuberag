@@ -11,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && apt-get purge -y build-essential && apt-get autoremove -y
 
-COPY rag_worker/ ./rag_worker/
+COPY --chown=65532:65532 rag_worker/ ./rag_worker/
 
 # Run as non-root, consistent with the pod security context.
 USER 65532:65532
