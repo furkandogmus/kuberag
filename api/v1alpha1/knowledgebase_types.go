@@ -400,6 +400,10 @@ type KnowledgeBaseStatus struct {
 	// ActiveJob is the name of the in-flight ingestion/eval Job, if any.
 	// +optional
 	ActiveJob string `json:"activeJob,omitempty"`
+	// IngestRound increments for every ingestion attempt so retries never
+	// collide with a still-present finished Job.
+	// +optional
+	IngestRound int `json:"ingestRound,omitempty"`
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge

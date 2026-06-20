@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 import os
 import sys
+import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -124,18 +125,17 @@ class TestSources(unittest.TestCase):
         response.headers = {"content-type": "text/html"}
         mock_get.return_value = response
 
-        result = fetch_web({
-            "name": "site",
-            "type": "web",
-            "web": {
-                "urls": ["https://example.com/start"],
-                "maxDepth": 0,
-                "sameDomainOnly": True,
-                "maxPages": 10,
-            },
-        })
-
-        self.assertEqual(result.docs, [])
+        with self.assertRaisesRegex(RuntimeError, "redirected outside allowed domains"):
+            fetch_web({
+                "name": "site",
+                "type": "web",
+                "web": {
+                    "urls": ["https://example.com/start"],
+                    "maxDepth": 0,
+                    "sameDomainOnly": True,
+                    "maxPages": 10,
+                },
+            })
 
     @patch("requests.get")
     def test_fetch_web_max_pages_limits_requests_not_only_documents(self, mock_get):
@@ -162,6 +162,71 @@ class TestSources(unittest.TestCase):
 
         self.assertEqual(result.docs, [("https://example.com/", "Home Empty Never")])
         self.assertEqual(mock_get.call_count, 2)
+
+    @patch("requests.get")
+    def test_fetch_web_fails_when_seed_is_unreachable(self, mock_get):
+        mock_get.side_effect = requests.ConnectionError("connection refused")
+
+        with self.assertRaisesRegex(RuntimeError, "web crawl request failed"):
+            fetch_web({
+                "name": "site",
+                "type": "web",
+                "web": {
+                    "urls": ["https://example.com/"],
+                    "maxDepth": 0,
+                    "sameDomainOnly": True,
+                    "maxPages": 10,
+                },
+            })
+
+    @patch("requests.get")
+    def test_fetch_web_fails_on_retryable_discovered_page_error(self, mock_get):
+        first = MagicMock(
+            status_code=200,
+            url="https://example.com/",
+            text='<h1>Home</h1><a href="/docs">Docs</a>',
+        )
+        first.headers = {"content-type": "text/html"}
+        unavailable = MagicMock(status_code=503, url="https://example.com/docs", text="")
+        unavailable.headers = {"content-type": "text/html"}
+        mock_get.side_effect = [first, unavailable]
+
+        with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+            fetch_web({
+                "name": "site",
+                "type": "web",
+                "web": {
+                    "urls": ["https://example.com/"],
+                    "maxDepth": 1,
+                    "sameDomainOnly": True,
+                    "maxPages": 10,
+                },
+            })
+
+    @patch("requests.get")
+    def test_fetch_web_ignores_missing_discovered_page(self, mock_get):
+        first = MagicMock(
+            status_code=200,
+            url="https://example.com/",
+            text='<h1>Home</h1><a href="/removed">Removed</a>',
+        )
+        first.headers = {"content-type": "text/html"}
+        missing = MagicMock(status_code=404, url="https://example.com/removed", text="")
+        missing.headers = {"content-type": "text/html"}
+        mock_get.side_effect = [first, missing]
+
+        result = fetch_web({
+            "name": "site",
+            "type": "web",
+            "web": {
+                "urls": ["https://example.com/"],
+                "maxDepth": 1,
+                "sameDomainOnly": True,
+                "maxPages": 10,
+            },
+        })
+
+        self.assertEqual(result.docs, [("https://example.com/", "Home Removed")])
 
 
 if __name__ == "__main__":

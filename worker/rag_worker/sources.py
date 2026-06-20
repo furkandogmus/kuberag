@@ -305,6 +305,7 @@ def fetch_web(src: dict) -> SourceDocs:
     max_pages = web.get("maxPages", 200)
 
     normalized_seeds = [url for seed in seeds if (url := _normalize_web_url(seed)) is not None]
+    seed_urls = set(normalized_seeds)
     seen: set[str] = set()
     queued: set[str] = set(normalized_seeds)
     indexed: set[str] = set()
@@ -322,21 +323,33 @@ def fetch_web(src: dict) -> SourceDocs:
         fetched_pages += 1
         try:
             resp = requests.get(url, timeout=15, headers={"User-Agent": "kuberag/1.0"})
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            raise RuntimeError(f"web crawl request failed for {url}: {exc}") from exc
+        if resp.status_code != 200:
+            if url in seed_urls or resp.status_code == 429 or resp.status_code >= 500:
+                raise RuntimeError(f"web crawl request returned HTTP {resp.status_code} for {url}")
             continue
-        if resp.status_code != 200 or "text/html" not in resp.headers.get("content-type", ""):
+        if "text/html" not in resp.headers.get("content-type", ""):
+            if url in seed_urls:
+                raise RuntimeError(f"web crawl seed is not HTML: {url}")
             continue
 
         final_url = _normalize_web_url(resp.url)
         if final_url is None:
+            if url in seed_urls:
+                raise RuntimeError(f"web crawl seed redirected to an invalid URL: {url}")
             continue
         if same_domain and _web_hostname(final_url) not in seed_domains:
+            if url in seed_urls:
+                raise RuntimeError(f"web crawl seed redirected outside allowed domains: {url}")
             continue
         if final_url in indexed:
             continue
 
         text, links, base_href = _parse_html(resp.text)
         if not text:
+            if url in seed_urls:
+                raise RuntimeError(f"web crawl seed contains no indexable text: {url}")
             continue
         docs.append((final_url, text))
         indexed.add(final_url)

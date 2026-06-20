@@ -1525,6 +1525,11 @@ spec:
                 description: IndexedChunks is the total number of chunks in the store
                   after the last run.
                 type: integer
+              ingestRound:
+                description: |-
+                  IngestRound increments for every ingestion attempt so retries never
+                  collide with a still-present finished Job.
+                type: integer
               lastIndexedTime:
                 format: date-time
                 type: string

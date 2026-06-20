@@ -233,6 +233,88 @@ func TestKnowledgeBaseReconcileLifecycle(t *testing.T) {
 		}
 		return nil
 	})
+
+	eventually(t, 15*time.Second, func() error {
+		var job batchv1.Job
+		err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: jobName}, &job)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("completed ingestion job still present (err=%v)", err)
+	})
+}
+
+func TestFailedIngestionAdvancesToUniqueRetryName(t *testing.T) {
+	ns := newNamespace(t)
+	kb := sampleKB(ns, "failed-ingest")
+	if err := k8sClient.Create(testCtx, kb); err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+
+	var job batchv1.Job
+	eventually(t, 15*time.Second, func() error {
+		found, err := firstIngestJob(ns, kb.Name)
+		if err != nil {
+			return err
+		}
+		job = *found
+		return nil
+	})
+
+	job.Status.Failed = 1
+	job.Status.Conditions = []batchv1.JobCondition{
+		{
+			Type:   batchv1.JobFailureTarget,
+			Status: corev1.ConditionTrue,
+			Reason: "BackoffLimitExceeded",
+		},
+		{
+			Type:   batchv1.JobFailed,
+			Status: corev1.ConditionTrue,
+			Reason: "BackoffLimitExceeded",
+		},
+	}
+	if err := k8sClient.Status().Update(testCtx, &job); err != nil {
+		t.Fatalf("mark job failed: %v", err)
+	}
+	if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(&job), &job); err != nil {
+		t.Fatalf("read failed job: %v", err)
+	}
+	if !jobFailed(&job) {
+		t.Fatalf("failed condition not persisted: %#v", job.Status.Conditions)
+	}
+	r := &KnowledgeBaseReconciler{Client: k8sClient}
+	eventually(t, 10*time.Second, func() error {
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), kb); err != nil {
+			return err
+		}
+		_, _, err := r.finalizeIngest(testCtx, kb, &job, effectiveChunking(kb), specHash(kb, ""))
+		return err
+	})
+
+	eventually(t, 10*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.Phase != ragv1alpha1.PhaseFailed {
+			return fmt.Errorf("phase=%s, want Failed", got.Status.Phase)
+		}
+		return nil
+	})
+
+	if kb.Status.IngestRound == 0 {
+		t.Fatal("expected ingestion round to be recorded")
+	}
+	previousName := job.Name
+	kb.Status.IngestRound++
+	retry, err := buildIngestJob(kb, specHash(kb, ""), ragv1alpha1.IngestFull, effectiveChunking(kb))
+	if err != nil {
+		t.Fatalf("build retry job: %v", err)
+	}
+	if retry.Name == previousName {
+		t.Fatalf("retry job name collided with failed job %q", previousName)
+	}
 }
 
 func TestKnowledgeBaseFinalizerCleanup(t *testing.T) {

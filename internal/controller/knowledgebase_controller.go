@@ -175,6 +175,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		if err := r.statusUpdate(ctx, kb); err != nil {
 			return ctrl.Result{}, true, err
 		}
+		r.deleteJob(ctx, job)
 		return ctrl.Result{RequeueAfter: time.Minute}, true, nil
 	}
 
@@ -206,6 +207,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	if err := r.statusUpdate(ctx, kb); err != nil {
 		return ctrl.Result{}, true, err
 	}
+	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
 }
 
@@ -328,6 +330,7 @@ func (r *KnowledgeBaseReconciler) startIngest(
 		}
 	}
 
+	kb.Status.IngestRound++
 	job, err := buildIngestJob(kb, hash, mode, eff)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -442,6 +445,13 @@ func (r *KnowledgeBaseReconciler) event(obj runtime.Object, etype, reason, msg s
 	}
 	// New events API: regarding, related, eventtype, reason, action, note.
 	r.Recorder.Eventf(obj, nil, etype, reason, reason, msg, args...)
+}
+
+func (r *KnowledgeBaseReconciler) deleteJob(ctx context.Context, job *batchv1.Job) {
+	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil &&
+		!apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "failed to delete finished job", "job", job.Name)
+	}
 }
 
 // ---------------------------------------------------------------------------
