@@ -12,4 +12,6 @@ pydantic==2.13.4
 python-multipart==0.0.31     # /ingest/file Form uploads (playground dev mode)
 requests==2.33.0         # /ingest/url web fetch (playground dev mode)
 pypdf==6.7.3             # PDF extraction for /ingest/file
-pillow>=12.1.1           # transitively pulled; pin to CVE-free version
+# pillow pin: fastembed 0.4.2 requires pillow<11.0.0 >=10.3.0,
+# so 12.x is unavailable. Trivy will flag CVE-2026-25990 etc.
+# until fastembed upgrades.

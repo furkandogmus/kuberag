@@ -7,7 +7,10 @@ kubernetes==31.0.0
 boto3==1.35.76           # s3
 requests==2.33.0         # web crawl
 pypdf==6.7.3             # pdf parser
-pillow>=12.1.1           # transitively pulled by fastembed; pin to CVE-free version
+# pillow pin: fastembed 0.4.2 requires pillow<11.0.0 >=10.3.0,
+# so 12.x is unavailable. The Trivy scan will report pillow CVEs
+# until fastembed upgrades its constraint. Tracked in ROADMAP.
+# pillow>=12.1.1           # transitively pulled by fastembed
 
 # Optional vector stores (kept here so the single worker image is fully capable)
 psycopg[binary]==3.2.3   # pgvector

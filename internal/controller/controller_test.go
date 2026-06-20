@@ -892,7 +892,7 @@ func TestSecretRotationPreservesObservedSpecHash(t *testing.T) {
 	// Rotate the Secret. The reconciler must report a new hash on
 	// its next pass — independently of any in-flight Job.
 	secret.Data["apiKey"] = []byte("v2-credential")
-	if err := r.Client.Update(context.Background(), secret); err != nil {
+	if err := r.Update(context.Background(), secret); err != nil {
 		t.Fatalf("update secret: %v", err)
 	}
 	hashV2 := r.computeSecretsHash(context.Background(), kb)
@@ -906,7 +906,7 @@ func TestSecretRotationPreservesObservedSpecHash(t *testing.T) {
 	// specific literal (the hash is content-derived).
 	corpusHash1 := corpusHash(kb)
 	secret.Data["apiKey"] = []byte("v3-credential")
-	if err := r.Client.Update(context.Background(), secret); err != nil {
+	if err := r.Update(context.Background(), secret); err != nil {
 		t.Fatalf("update secret again: %v", err)
 	}
 	corpusHash2 := corpusHash(kb)
