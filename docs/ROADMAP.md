@@ -108,25 +108,127 @@ welcome.
 
 ## Near term
 
-- **Validating/defaulting webhooks** (today: CEL validation catches most issues,
-  webhooks would add cross-field defaults and richer validation).
-- **Incremental at file granularity** (today: skip is per-source via revision
-  probe; could diff individual files for finer-grained updates).
-- **More sources**: Confluence/Notion API, generic Git (non-GitHub), local PVC
-  mounts.
-- **Retriever PDB managed by controller** (today: static template).
+### Operator maturity
+- **Validating/defaulting webhooks** — admission webhooks would add cross-field
+  defaults (e.g. auto-derive `collection` from KB name at admission time),
+  richer validation (secret key existence, endpoint reachability pre-check),
+  and immutability guards. Today CEL validation + controller-side error handling
+  covers most cases.
+- **Conversion webhook** — required before introducing `v1beta1` or `v1`. Must
+  convert stored objects between API versions without data loss.
+- **Namespace-scoped operator mode** — today the operator is cluster-scoped
+  (ClusterRole); an option restricted to a watch namespace reduces blast radius
+  for multi-tenant clusters.
+
+### Ingestion improvements
+- **Incremental at file granularity** — today skip is per-source via revision
+  probe (git SHA, S3 ETags, crawl hash). File-level diffing would detect exactly
+  which documents changed and re-embed only those, dramatically reducing ingestion
+  time for large repos on freshness runs.
+- **Webhook-driven sync** — GitHub webhooks / S3 event notifications could trigger
+  ingestion immediately instead of waiting for the cron tick. Complements cron
+  freshness as a push-based alternative.
+- **More sources**:
+  - **Confluence / Notion** — REST API clients for common knowledge management
+    platforms with pagination, attachment handling, and incremental sync via
+    `updatedAt` cursors.
+  - **Generic Git** — today GitHub's token auth is baked in; support any Git
+    remote (GitLab, Bitbucket, Gitea) via SSH key or generic HTTP token.
+  - **Local PVC** — mount an existing PersistentVolumeClaim and index its
+    contents, enabling air-gapped / on-premise document stores.
+  - **Google Drive / SharePoint** — cloud document storage APIs with OAuth2.
+- **Web crawl depth and rate limiting** — per-domain rate limits, `robots.txt`
+  compliance, `sitemap.xml` discovery, JavaScript rendering for SPAs.
+
+### Serving & retrieval
+- **Retriever HPA** — horizontal pod autoscaling on CPU/memory or custom metrics
+  (requests per second, query latency p95). Today replicas are static.
+- **Retriever PDB managed by controller** — the operator should create and own a
+  PodDisruptionBudget for each Retriever instead of requiring a manual template.
+- **Streaming generation (SSE)** — server-sent events for token-by-token LLM
+  output, giving users progressive answer rendering.
+- **Retriever ingress/route** — optionally create an Ingress or OpenShift Route
+  for the retriever Service, with TLS and auth annotations.
+
+### Evaluation & tuning
+- **Auto-generated eval datasets** — sample questions from ingested chunks
+  (synthetic query generation via LLM) so users don't need to manually write
+  `{query, expectedSources}` pairs.
+- **Multi-metric evaluation** — beyond recall@k: answer faithfulness
+  (LLM-as-judge comparing answer to retrieved context), context relevance,
+  answer completeness, hallucination detection.
+- **Chunking strategy auto-selection** — today auto-tune explores overlap, size,
+  and strategy rotation; the operator could pre-select the optimal starting
+  strategy based on document structure analysis (heading density, paragraph
+  length distribution).
+- **Embedding model benchmarking** — test multiple embedding models against the
+  same dataset and compare recall/latency/cost, surfacing the best pick.
+
+### Observability & operations
+- **Distributed tracing** — OpenTelemetry spans across reconcile → Job → worker
+  → store, surfacing end-to-end ingestion and query latency.
+- **Worker Job logs aggregation** — surface worker logs in `kubectl describe kb`
+  or status conditions for faster debugging when an ingestion fails.
+- **SLO dashboards** — pre-built Grafana SLO panels for ingestion freshness
+  (time since last successful index) and retrieval latency percentiles.
 
 ## Later
 
-- **`KnowledgeBase` composition** — multiple vector stores, multi-tenant
-  namespaces, cross-namespace references.
-- **Cost/usage accounting** — track token consumption for hosted embedding &
-  generation providers.
-- **Eval suites** beyond recall@k — faithfulness (LLM-as-judge), answer
-  relevance, latency SLOs, drift detection over time.
-- **Autoscaling** — scale ingestion workers by queue depth; GPU-aware scheduling
-  for embedding/reranking workloads.
-- **v1 API** — stabilization, deprecation policy, conversion webhook, formal
-  upgrade guarantees.
+### Multi-tenancy & federation
+- **`KnowledgeBase` composition** — a single `KnowledgeBase` spanning multiple
+  vector stores (e.g. Qdrant for fast search + pgvector for analytical queries)
+  or multiple embedding models on the same content.
+- **Cross-namespace references** — today `KnowledgeBaseRef` must be same-namespace;
+  support referencing a KB from another namespace (with RBAC validation).
+- **Federated retrieval** — query across multiple KnowledgeBases and merge/fuse
+  results, with per-KB weighting.
+
+### Cost & resource management
+- **Token usage accounting** — track embedding and generation token consumption
+  per KnowledgeBase, exposed as Prometheus metrics and status fields. Break down
+  by provider and model for cost attribution.
+- **Ingestion cost estimation** — predict ingestion cost (API calls, compute time)
+  before running, based on source size and embedding model pricing.
+- **Budget enforcement** — `maxTokensPerPeriod` or `maxCostPerMonth` on
+  embedding/generation specs, pausing ingestion/generation when exceeded.
+- **Spot-instance friendly workers** — worker Jobs tolerant of preemption with
+  checkpoint/resume so interrupted ingestions don't restart from zero.
+
+### Advanced retrieval
+- **Query rewriting / expansion** — automatically rewrite user queries (synonym
+  expansion, HyDE, multi-query) before retrieval to improve recall on vague or
+  short queries.
+- **Semantic caching** — cache query embeddings and results with a similarity
+  threshold; near-duplicate queries hit the cache, skipping the expensive
+  embed→search→generate pipeline.
+- **Multi-modal RAG** — embed images, diagrams, and tables from documents along
+  with text, using vision embedding models. Retrieve visual context alongside
+  text chunks.
+- **Knowledge graphs** — extract entities and relationships from chunks, store
+  in a graph alongside vectors, and traverse during retrieval for richer context.
+
+### Evaluation & quality
+- **A/B testing framework** — run two chunking/embedding configurations side by
+  side on the same dataset, compare metrics, and promote the winner.
+- **Drift detection & alerting** — monitor recall/latency over time; alert when
+  metrics regress below a configurable threshold between scheduled evaluations.
+- **Answer grounding verification** — check that every claim in a generated
+  answer is supported by a retrieved chunk (citation grounding score).
+- **User feedback loop** — accept thumbs-up/down on query responses, feed back
+  into eval metrics and auto-tune decisions.
+
+### Platform & ecosystem
+- **OLM integration** — Operator Lifecycle Manager bundle for OpenShift and
+  vanilla OLM clusters, with automatic upgrades and dependency management.
+- **`kuberag` CLI** — `kubectl` plugin for common operations: `kuberag query`
+  (search without port-forward), `kuberag ingest` (trigger manual ingestion),
+  `kuberag eval` (run evaluation ad-hoc), `kuberag diff` (preview what a spec
+  change would re-index).
+- **KnowledgeBase templates** — a catalog of pre-configured KnowledgeBases for
+  common use cases: "index my GitHub docs", "RAG over a website", "company
+  handbook search".
+- **v1 API** — stabilization after real-world usage, deprecation policy for
+  `v1alpha1` fields, conversion webhook, formal upgrade guarantees, API review
+  with Kubernetes SIG conventions.
 
 See [issues](https://github.com/furkandogmus/kuberag/issues) to propose or pick up work.
