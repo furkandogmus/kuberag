@@ -157,6 +157,13 @@ type EmbeddingSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Dimension int `json:"dimension,omitempty"`
+	// QueryPrefix prepends to every query before embedding (e.g. "query: ").
+	// Useful for BGE/Instructor-style models that use instruction prefixes.
+	// +optional
+	QueryPrefix string `json:"queryPrefix,omitempty"`
+	// DocumentPrefix prepends to every document before embedding (e.g. "passage: ").
+	// +optional
+	DocumentPrefix string `json:"documentPrefix,omitempty"`
 	// APIKeySecretRef holds the provider API key when Provider != local.
 	// +optional
 	APIKeySecretRef *SecretKeyRef `json:"apiKeySecretRef,omitempty"`

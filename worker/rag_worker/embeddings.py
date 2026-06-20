@@ -30,11 +30,14 @@ PROVIDER_BASE_URLS = {
 class Embedder:
     """Embeds documents/queries with a consistent dimension across providers."""
 
-    def __init__(self, model: str, provider: str = "local", base_url: str = "", dimension: int = 0):
+    def __init__(self, model: str, provider: str = "local", base_url: str = "",
+                 dimension: int = 0, query_prefix: str = "", document_prefix: str = ""):
         self.model = model
         self.provider = provider or "local"
         self._client = None
         self._fe = None
+        self.query_prefix = query_prefix
+        self.document_prefix = document_prefix
 
         if self.provider == "local":
             from fastembed import TextEmbedding
@@ -69,11 +72,15 @@ class Embedder:
         return [d.embedding for d in resp.data]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if self.document_prefix:
+            texts = [self.document_prefix + t for t in texts]
         if self._fe is not None:
             return [list(map(float, v)) for v in self._fe.embed(texts)]
         return self._embed_remote(texts)
 
     def embed_query(self, text: str) -> list[float]:
+        if self.query_prefix:
+            text = self.query_prefix + text
         return self.embed_documents([text])[0]
 
 
@@ -84,4 +91,6 @@ def from_spec(embedding: dict) -> Embedder:
         embedding.get("provider", "local"),
         embedding.get("baseURL", ""),
         int(embedding.get("dimension", 0) or 0),
+        embedding.get("queryPrefix", ""),
+        embedding.get("documentPrefix", ""),
     )

@@ -81,10 +81,29 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	rt.Status.ReadyReplicas = live.Status.ReadyReplicas
 	rt.Status.ObservedGeneration = rt.Generation
 	rt.Status.ServiceEndpoint = fmt.Sprintf("http://%s.%s.svc:8000", svc.Name, svc.Namespace)
+
+	// Check VectorIndex health before reporting Available.
+	var vi ragv1alpha1.VectorIndex
+	viKey := types.NamespacedName{Namespace: kb.Namespace, Name: truncName(kb.Name + "-index")}
+	viHealthy := true
+	viReason := ""
+	if err := r.Get(ctx, viKey, &vi); err == nil {
+		if vi.Status.Health == ragv1alpha1.IndexMissing || vi.Status.Health == ragv1alpha1.IndexDegraded {
+			viHealthy = false
+			viReason = fmt.Sprintf("vectorindex %s has health %s", vi.Name, vi.Status.Health)
+		}
+	}
+
 	if live.Status.ReadyReplicas >= rt.Spec.Replicas && rt.Spec.Replicas > 0 {
-		rt.Status.Phase = "Available"
-		setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionTrue, "MinimumReplicasAvailable",
-			fmt.Sprintf("%d/%d replicas ready", live.Status.ReadyReplicas, rt.Spec.Replicas))
+		if viHealthy {
+			rt.Status.Phase = "Available"
+			setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionTrue, "MinimumReplicasAvailable",
+				fmt.Sprintf("%d/%d replicas ready", live.Status.ReadyReplicas, rt.Spec.Replicas))
+		} else {
+			rt.Status.Phase = "Progressing"
+			setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionFalse, "VectorIndexUnhealthy",
+				viReason)
+		}
 	} else {
 		rt.Status.Phase = "Progressing"
 		setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionFalse, "Progressing",
@@ -156,6 +175,8 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		{Name: "EMBEDDING_PROVIDER", Value: emb.Provider},
 		{Name: "EMBEDDING_BASE_URL", Value: emb.BaseURL},
 		{Name: "EMBEDDING_DIMENSION", Value: fmt.Sprintf("%d", emb.Dimension)},
+		{Name: "EMBEDDING_QUERY_PREFIX", Value: emb.QueryPrefix},
+		{Name: "EMBEDDING_DOC_PREFIX", Value: emb.DocumentPrefix},
 		{Name: "TOPK", Value: fmt.Sprintf("%d", defaultInt(rt.Spec.TopK, 8))},
 		{Name: "SCORE_THRESHOLD", Value: fmt.Sprintf("%d", rt.Spec.ScoreThresholdPercent)},
 		{Name: "RERANK_ENABLED", Value: fmt.Sprintf("%t", rerankEnabled)},
@@ -187,6 +208,8 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 	}
 
 	env = append(env, scratchEnv()...)
+	// Disable playground ingest endpoints in production deployments.
+	env = append(env, corev1.EnvVar{Name: "DISABLE_PLAYGROUND_INGEST", Value: "true"})
 
 	var resources corev1.ResourceRequirements
 	if rt.Spec.Resources != nil {

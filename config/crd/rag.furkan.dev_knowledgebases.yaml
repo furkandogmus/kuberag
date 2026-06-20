@@ -111,6 +111,10 @@ spec:
                       built-in table for known models, otherwise auto-detected at ingest time.
                     minimum: 1
                     type: integer
+                  documentPrefix:
+                    description: 'DocumentPrefix prepends to every document before
+                      embedding (e.g. "passage: ").'
+                    type: string
                   model:
                     default: bge-small
                     description: Model name, e.g. "bge-small", "bge-large", "text-embedding-3-small".
@@ -128,6 +132,11 @@ spec:
                     - openai
                     - gemini
                     - openai-compatible
+                    type: string
+                  queryPrefix:
+                    description: |-
+                      QueryPrefix prepends to every query before embedding (e.g. "query: ").
+                      Useful for BGE/Instructor-style models that use instruction prefixes.
                     type: string
                 required:
                 - model

@@ -83,6 +83,8 @@ def _embedding_spec() -> dict:
         "provider": os.environ.get("EMBEDDING_PROVIDER", "local") or "local",
         "baseURL": os.environ.get("EMBEDDING_BASE_URL", ""),
         "dimension": int(os.environ.get("EMBEDDING_DIMENSION", "0") or 0),
+        "queryPrefix": os.environ.get("EMBEDDING_QUERY_PREFIX", ""),
+        "documentPrefix": os.environ.get("EMBEDDING_DOC_PREFIX", ""),
     }
 
 
@@ -218,6 +220,7 @@ class QueryResponse(BaseModel):
     query: str
     results: list[Chunk]
     answer: str | None = None
+    generationError: str | None = None
     meta: QueryMeta | None = None
 
 
@@ -307,6 +310,7 @@ def query(req: QueryRequest) -> QueryResponse:
     )
 
     answer = None
+    genErr = None
     if _GEN_ENABLED and results:
         try:
             answer = _generate(
@@ -318,13 +322,13 @@ def query(req: QueryRequest) -> QueryResponse:
                 max_tokens=req.maxTokens,
             )
         except Exception as e:
-            # Generation is best-effort: never fail retrieval because the LLM
-            # call errored (quota, timeout, bad model). Surface the reason.
-            answer = f"[generation unavailable: {type(e).__name__}: {e}]"
-    return QueryResponse(query=req.query, results=results, answer=answer, meta=meta)
+            genErr = f"{type(e).__name__}: {e}"
+    return QueryResponse(query=req.query, results=results, answer=answer, generationError=genErr, meta=meta)
 
 
 # Ingest endpoints (Dev/Playground mode)
+DISABLE_PLAYGROUND_INGEST = os.environ.get("DISABLE_PLAYGROUND_INGEST", "").lower() == "true"
+
 class UrlIngestRequest(BaseModel):
     url: str = Field(min_length=1)
     source: str = Field(default="playground", min_length=1)
@@ -341,6 +345,8 @@ def ingest_file(
     maxTokens: int = Form(800),
     overlap: int = Form(80),
 ) -> dict:
+    if DISABLE_PLAYGROUND_INGEST:
+        return {"status": "error", "message": "Playground ingest is disabled in production."}
     _ensure()
     content = file.file.read()
     filename = file.filename
@@ -376,6 +382,8 @@ def ingest_file(
 
 @app.post("/ingest/url")
 def ingest_url(req: UrlIngestRequest) -> dict:
+    if DISABLE_PLAYGROUND_INGEST:
+        return {"status": "error", "message": "Playground ingest is disabled in production."}
     _ensure()
     import requests
     from rag_worker.sources import _strip_html

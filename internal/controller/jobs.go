@@ -279,10 +279,16 @@ func buildCleanupJob(kb *ragv1alpha1.KnowledgeBase) (*batchv1.Job, error) {
 	return job, nil
 }
 
-// marshalEffectiveSpec serializes the spec with the effective chunking applied.
+// marshalEffectiveSpec serializes the spec with the effective chunking applied
+// and the resolved embedding dimension injected so the worker never needs to
+// probe the embedding API to discover it.
 func marshalEffectiveSpec(kb *ragv1alpha1.KnowledgeBase, effChunking ragv1alpha1.ChunkingSpec) (string, error) {
 	spec := kb.Spec.DeepCopy()
 	spec.Chunking = effChunking
+	// Pre-resolve the embedding dimension so the worker can skip the API probe.
+	if spec.Embedding.Dimension == 0 {
+		spec.Embedding.Dimension = embeddingDimension(kb.Spec.Embedding)
+	}
 	b, err := json.Marshal(spec)
 	if err != nil {
 		return "", err

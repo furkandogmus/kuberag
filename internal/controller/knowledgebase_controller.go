@@ -165,7 +165,6 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, job *batchv1.Job, eff ragv1alpha1.ChunkingSpec, hash string,
 ) (ctrl.Result, bool, error) {
 	if jobFailed(job) {
-		r.deleteResult(ctx, kb.Namespace, job.Name)
 		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		kb.Status.ActiveJob = ""
 		ingestionsTotal.WithLabelValues(kb.Name, "failed").Inc()
@@ -175,6 +174,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		if err := r.statusUpdate(ctx, kb); err != nil {
 			return ctrl.Result{}, true, err
 		}
+		r.deleteResult(ctx, kb.Namespace, job.Name)
 		r.deleteJob(ctx, job)
 		return ctrl.Result{RequeueAfter: time.Minute}, true, nil
 	}
@@ -184,7 +184,6 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		// Result not yet visible; retry shortly.
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 	}
-	r.deleteResult(ctx, kb.Namespace, job.Name)
 
 	kb.Status.Phase = ragv1alpha1.PhaseReady
 	kb.Status.ObservedSpecHash = hash
@@ -207,6 +206,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	if err := r.statusUpdate(ctx, kb); err != nil {
 		return ctrl.Result{}, true, err
 	}
+	r.deleteResult(ctx, kb.Namespace, job.Name)
 	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
 }
@@ -217,17 +217,19 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	kb.Status.ActiveJob = ""
 
 	if jobFailed(job) {
-		r.deleteResult(ctx, kb.Namespace, job.Name)
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "EvalFailed", "evaluation job failed")
 		r.event(kb, corev1.EventTypeWarning, "EvalFailed", "evaluation job %s failed", job.Name)
-		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+		if err := r.statusUpdate(ctx, kb); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		r.deleteResult(ctx, kb.Namespace, job.Name)
+		return ctrl.Result{Requeue: true}, true, nil
 	}
 
 	var result EvalResult
 	if err := r.readResult(ctx, kb.Namespace, job.Name, &result); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 	}
-	r.deleteResult(ctx, kb.Namespace, job.Name)
 
 	now := metav1.Now()
 	kb.Status.Evaluation = &ragv1alpha1.EvaluationStatus{
@@ -246,7 +248,11 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			"evaluation dataset empty; recall gate skipped — add queries to the dataset ConfigMap")
 		r.event(kb, corev1.EventTypeWarning, "EvalNoDataset",
 			"evaluation dataset empty; skipping recall gate and auto-tune")
-		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+		if err := r.statusUpdate(ctx, kb); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		r.deleteResult(ctx, kb.Namespace, job.Name)
+		return ctrl.Result{Requeue: true}, true, nil
 	}
 
 	rq := kb.Spec.RetrievalQuality
@@ -255,10 +261,6 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 
 	if !below {
 		kb.Status.Phase = ragv1alpha1.PhaseReady
-		// Target met: this is a clean baseline. Reset the tuning budget and
-		// best-config memory (but keep the effective chunking that got us here) so
-		// that if a future scheduled eval detects drift below target, auto-tune can
-		// re-engage from scratch rather than being permanently exhausted.
 		kb.Status.AutoTuneAttempts = 0
 		kb.Status.BestChunking = nil
 		kb.Status.BestRecallPercent = 0
@@ -267,7 +269,11 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionTrue, "RecallMet",
 			fmt.Sprintf("recall %d%% >= target %d%%", result.RecallPercent, target))
 		r.event(kb, corev1.EventTypeNormal, "RecallMet", "recall %d%% meets target %d%%", result.RecallPercent, target)
-		return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+		if err := r.statusUpdate(ctx, kb); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		r.deleteResult(ctx, kb.Namespace, job.Name)
+		return ctrl.Result{Requeue: true}, true, nil
 	}
 
 	// Below target. Remember the best config we've seen before stepping further,
@@ -285,8 +291,11 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			r.event(kb, corev1.EventTypeNormal, "AutoTuning",
 				"recall %d%% below target %d%%, re-indexing with tuned chunking (attempt %d/%d)",
 				result.RecallPercent, target, kb.Status.AutoTuneAttempts, autoTuneMax(rq))
-			// Re-index will be triggered next pass because PendingRetune was set.
-			return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+			if err := r.statusUpdate(ctx, kb); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			r.deleteResult(ctx, kb.Namespace, job.Name)
+			return ctrl.Result{Requeue: true}, true, nil
 		}
 
 		// Attempts exhausted. Land on the best config observed rather than the
@@ -299,7 +308,11 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			r.event(kb, corev1.EventTypeNormal, "AutoTuneSettling",
 				"auto-tune exhausted, re-indexing with best config seen (recall %d%% < target %d%%)",
 				kb.Status.BestRecallPercent, target)
-			return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+			if err := r.statusUpdate(ctx, kb); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			r.deleteResult(ctx, kb.Namespace, job.Name)
+			return ctrl.Result{Requeue: true}, true, nil
 		}
 	}
 
@@ -311,7 +324,11 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	r.event(kb, corev1.EventTypeWarning, "RecallBelowTarget",
 		"recall %d%% below target %d%% and auto-tune exhausted (best %d%%)",
 		result.RecallPercent, target, kb.Status.BestRecallPercent)
-	return ctrl.Result{Requeue: true}, true, r.statusUpdate(ctx, kb)
+	if err := r.statusUpdate(ctx, kb); err != nil {
+		return ctrl.Result{}, true, err
+	}
+	r.deleteResult(ctx, kb.Namespace, job.Name)
+	return ctrl.Result{Requeue: true}, true, nil
 }
 
 func (r *KnowledgeBaseReconciler) startIngest(
@@ -405,7 +422,16 @@ func (r *KnowledgeBaseReconciler) reconcileDelete(ctx context.Context, kb *ragv1
 	if !jobComplete(&job) && !jobFailed(&job) {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
-	// Cleanup finished (success or give-up). Remove the cleanup Job and finalizer.
+	// Only release the finalizer when cleanup actually succeeded.
+	// On failure, delete the failed Job and retry — the finalizer keeps the
+	// KB alive so the operator gets another chance to drop the collection.
+	if jobFailed(&job) {
+		r.event(kb, corev1.EventTypeWarning, "CleanupFailed",
+			"cleanup job %s failed; retrying", job.Name)
+		_ = r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground))
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	// Cleanup succeeded. Remove the cleanup Job and finalizer.
 	_ = r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground))
 	controllerutil.RemoveFinalizer(kb, finalizer)
 	if err := r.Update(ctx, kb); err != nil {
