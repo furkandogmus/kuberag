@@ -63,9 +63,7 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
         if shadow_count == 0:
             shadow_store.drop()
             shadow_store.close()
-            log("ERROR: full ingest produced 0 chunks; shadow collection dropped, active collection preserved")
-            write_result({"totalChunks": 0, "sources": source_results})
-            return
+            raise RuntimeError("full ingest produced 0 chunks — active collection preserved")
 
         # Atomically promote the shadow.
         store = make_store(spec)
@@ -74,25 +72,11 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
             # Fallback: non-atomic recreate into the live collection.
             log(f"WARNING: store does not support atomic swap; falling back to recreate")
             store.recreate_collection(embedder.dim, distance)
-            # Re-embed into the live collection (expensive but correct).
-            for src_result in source_results:
-                src_result["chunks"] = 0  # reset; we re-embed below
             _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results)
         else:
             log(f"atomic swap: {shadow_name} → {collection} promoted")
 
-        # Clean up shadow store client.
         shadow_store.close()
-        # The old collection was orphaned by the swap; drop it.
-        try:
-            old_name = f"{collection}-prev"
-            store.drop()  # drops the now-aliased-by-shadow old collection... 
-            # Actually after swap, store.collection == collection which now points to shadow.
-            # The old physical collection is orphaned. We can't easily drop it from here.
-            # Qdrant: old collection still exists but alias moved. Need to find and drop it.
-            # For simplicity, skip cleanup — the old collection is orphaned but harmless.
-        except Exception:
-            pass
 
         active_total = store.count()
         if active_total < total:
@@ -150,7 +134,12 @@ def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
                 source_results.append({"name": name, "revision": sd.revision, "chunks": _carry_chunks(prior, name)})
                 continue
 
-            # Replace this source's chunks wholesale (idempotent via deterministic point IDs).
+            # Replace this source's chunks: delete old, upsert new.
+            # NOTE: delete-before-upsert has a window where failure leaves the
+            # source empty. The Job is retried (backoffLimit=2) and upsert uses
+            # deterministic point IDs, so re-ingestion is idempotent. A future
+            # improvement would use shadow-based per-source swap or chunk_hash
+            # filtering to delete only obsolete chunks.
             store.delete_by_source(name)
             points = _iter_points(name, sd, strategy, max_tokens, overlap)
             count = _embed_and_upsert(embedder, store, points)

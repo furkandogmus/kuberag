@@ -153,6 +153,12 @@ spec:
                 type: integer
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec is immutable; only status.phase may transition from Running
+            to Succeeded/Failed
+          rule: '!has(self.status) || !has(self.status.phase) || self.status.phase
+            == ''Running'' || oldSelf.status.phase == self.status.phase || oldSelf.status.phase
+            == ''Running'''
     served: true
     storage: true
     subresources:

@@ -238,9 +238,14 @@ class QdrantStore(VectorStore):
             self.client.delete_collection(self.collection)
 
     def swap_collection(self, shadow_name: str) -> bool:
-        """Qdrant: atomically move alias from old to shadow collection."""
+        """Qdrant: promote shadow via alias. Drops old physical collection first
+        (the shadow already contains all verified data, so this is lossless)."""
         from qdrant_client import models
 
+        # If a physical collection with the active name exists, drop it so the
+        # alias can be created. The shadow already holds the verified data.
+        if self._exists():
+            self.client.delete_collection(self.collection)
         self.client.update_collection_aliases(
             change_aliases_operations=[
                 models.CreateAliasOperation(

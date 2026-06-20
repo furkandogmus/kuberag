@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -210,6 +211,8 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	kb.Status.Phase = ragv1alpha1.PhaseReady
 	kb.Status.ObservedSpecHash = hash
 	kb.Status.ObservedEmbeddingModel = kb.Spec.Embedding.Model
+	emb := kb.Spec.Embedding.DeepCopy()
+	kb.Status.ObservedEmbedding = emb
 	kb.Status.EffectiveChunking = &eff
 	kb.Status.PendingRetune = false // re-index satisfied
 	kb.Status.IndexedChunks = result.TotalChunks
@@ -257,7 +260,10 @@ func (r *KnowledgeBaseReconciler) pruneIngestionRuns(ctx context.Context, ns, kb
 	if len(list.Items) <= 10 {
 		return
 	}
-	// Keep the 10 most recent, delete the rest.
+	// Sort by creation timestamp ascending so we delete oldest first.
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[i].CreationTimestamp.Before(&list.Items[j].CreationTimestamp)
+	})
 	for i := 0; i < len(list.Items)-10; i++ {
 		_ = r.Delete(ctx, &list.Items[i])
 	}

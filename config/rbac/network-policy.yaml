@@ -1,5 +1,7 @@
-# NetworkPolicy: default-deny ingress to operator + retriever, allow essential egress.
-# Apply in kuberag-system and every namespace with KnowledgeBases.
+# NetworkPolicy: default-deny ingress to operator + workers, allow essential egress.
+# Apply in kuberag-system for the operator, and per KB namespace for workers.
+# The Retriever Deployment is managed by the operator but its ingress is handled
+# by the Service (ClusterIP) — do NOT apply this policy to Retriever pods.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -22,7 +24,6 @@ spec:
         - port: probes
           protocol: TCP
   egress:
-    # Talk to the Kubernetes API.
     - to:
         - namespaceSelector: {}
           podSelector:
@@ -31,13 +32,11 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-    # Watch/manage resources in workload namespaces.
     - to:
         - namespaceSelector: {}
       ports:
         - port: 10250
           protocol: TCP
-    # DNS.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -56,14 +55,14 @@ metadata:
   namespace: default
 spec:
   podSelector:
-    matchLabels:
-      app.kubernetes.io/managed-by: kuberag
+    matchExpressions:
+      - key: rag.furkan.dev/job-type
+        operator: Exists
   policyTypes:
     - Ingress
     - Egress
-  ingress: []  # deny all ingress to worker pods
+  ingress: []
   egress:
-    # DNS.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -74,7 +73,6 @@ spec:
       ports:
         - port: 53
           protocol: UDP
-    # Kubernetes API (publish result ConfigMap, read eval dataset).
     - to:
         - namespaceSelector: {}
           podSelector:
@@ -83,7 +81,6 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-    # Vector stores (Qdrant, pgvector, Milvus).
     - to:
         - namespaceSelector: {}
       ports:
@@ -95,7 +92,6 @@ spec:
           protocol: TCP
         - port: 19530
           protocol: TCP
-    # External APIs (embedding, generation, model downloads).
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -103,6 +99,7 @@ spec:
               - 10.0.0.0/8
               - 172.16.0.0/12
               - 192.168.0.0/16
+              - 169.254.0.0/16
       ports:
         - port: 443
           protocol: TCP

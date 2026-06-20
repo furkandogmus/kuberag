@@ -382,6 +382,10 @@ type KnowledgeBaseStatus struct {
 	// ObservedEmbeddingModel is the model used for the data currently in the store.
 	// +optional
 	ObservedEmbeddingModel string `json:"observedEmbeddingModel,omitempty"`
+	// ObservedEmbedding is the full embedding config of the indexed data.
+	// Used by the Retriever to query with the same provider/model/prefixes.
+	// +optional
+	ObservedEmbedding *EmbeddingSpec `json:"observedEmbedding,omitempty"`
 	// EffectiveChunking is the chunking actually in use (spec, possibly auto-tuned).
 	// +optional
 	EffectiveChunking *ChunkingSpec `json:"effectiveChunking,omitempty"`

@@ -165,18 +165,20 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 	}
 
 	emb := kb.Spec.Embedding
-	// Use the model actually in the store, not the desired spec — the index
-	// may still contain data from a previous model while a re-ingest is pending.
-	activeModel := emb.Model
-	if kb.Status.ObservedEmbeddingModel != "" {
-		activeModel = kb.Status.ObservedEmbeddingModel
+	// Use the embedding config actually in the store so queries match indexed data.
+	// When the spec changes (model, provider, baseURL, prefixes), the index still
+	// contains data from the previous config until re-ingestion completes.
+	if kb.Status.ObservedEmbedding != nil {
+		emb = *kb.Status.ObservedEmbedding
+	} else if kb.Status.ObservedEmbeddingModel != "" {
+		emb.Model = kb.Status.ObservedEmbeddingModel
 	}
 	env := []corev1.EnvVar{
 		{Name: "VECTORSTORE_TYPE", Value: string(kb.Spec.VectorStore.Type)},
 		{Name: "VECTORSTORE_ENDPOINT", Value: kb.Spec.VectorStore.Endpoint},
 		{Name: "VECTORSTORE_COLLECTION", Value: collection},
 		{Name: "DISTANCE", Value: string(kb.Spec.VectorStore.Distance)},
-		{Name: "EMBEDDING_MODEL", Value: activeModel},
+		{Name: "EMBEDDING_MODEL", Value: emb.Model},
 		// Query embedding must use the same provider as ingestion.
 		{Name: "EMBEDDING_PROVIDER", Value: emb.Provider},
 		{Name: "EMBEDDING_BASE_URL", Value: emb.BaseURL},
