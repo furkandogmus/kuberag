@@ -118,10 +118,10 @@ jobs:
         run: |
           python -m pip install pip-audit
           # setuptools pinned at 80.10.2 for pymilvus compat; CVEs accepted.
-          python -m pip_audit -r requirements.txt -s HIGH,CRITICAL || true
+          python -m pip_audit -r requirements.txt || true
       - name: pip-audit (retriever)
         working-directory: worker
-        run: python -m pip_audit -r requirements-retriever.txt -s HIGH,CRITICAL || true
+        run: python -m pip_audit -r requirements-retriever.txt || true
 
   container-scan:
     name: container vulnerability scan

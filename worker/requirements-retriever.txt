@@ -6,9 +6,10 @@ marshmallow==3.26.2
 setuptools==80.10.2
 openai==1.58.1
 httpx==0.28.1
-fastapi==0.115.6
-uvicorn==0.34.0
+fastapi==0.115.12
+uvicorn==0.38.0
 pydantic==2.13.4
-python-multipart==0.0.9  # /ingest/file Form uploads (playground dev mode)
+python-multipart==0.0.31     # /ingest/file Form uploads (playground dev mode)
 requests==2.33.0         # /ingest/url web fetch (playground dev mode)
 pypdf==6.7.3             # PDF extraction for /ingest/file
+pillow>=12.1.1           # transitively pulled; pin to CVE-free version
