@@ -43,6 +43,8 @@ type KnowledgeBaseReconciler struct {
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=knowledgebases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=knowledgebases/finalizers,verbs=update
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=vectorindices,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rag.furkan.dev,resources=ingestionruns,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rag.furkan.dev,resources=ingestionruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -195,7 +197,6 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		}
 		r.deleteResult(ctx, kb.Namespace, job.Name)
 		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
-		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 		r.deleteJob(ctx, job)
 		return ctrl.Result{RequeueAfter: time.Minute}, true, nil
 	}
@@ -227,10 +228,39 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	if err := r.statusUpdate(ctx, kb); err != nil {
 		return ctrl.Result{}, true, err
 	}
+	r.finalizeIngestionRun(ctx, kb.Namespace, job.Name, ragv1alpha1.IngestionRunSucceeded, result.TotalChunks, result.Sources, "")
 	r.deleteResult(ctx, kb.Namespace, job.Name)
 	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
+}
+
+func (r *KnowledgeBaseReconciler) finalizeIngestionRun(ctx context.Context, ns, name string, phase ragv1alpha1.IngestionRunPhase, chunks int, sources []IngestSourceResult, errMsg string) {
+	var ir ragv1alpha1.IngestionRun
+	if e := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &ir); e != nil {
+		return // IngestionRun may not exist (legacy Jobs without IR)
+	}
+	now := metav1.Now()
+	ir.Status.Phase = phase
+	ir.Status.CompletionTime = &now
+	ir.Status.TotalChunks = chunks
+	ir.Status.Sources = toSourceStatus(sources)
+	ir.Status.Error = errMsg
+	_ = r.Status().Update(ctx, &ir)
+}
+
+func (r *KnowledgeBaseReconciler) pruneIngestionRuns(ctx context.Context, ns, kbName string) {
+	var list ragv1alpha1.IngestionRunList
+	if err := r.List(ctx, &list, client.InNamespace(ns), client.MatchingLabels{labelKB: kbName}); err != nil {
+		return
+	}
+	if len(list.Items) <= 10 {
+		return
+	}
+	// Keep the 10 most recent, delete the rest.
+	for i := 0; i < len(list.Items)-10; i++ {
+		_ = r.Delete(ctx, &list.Items[i])
+	}
 }
 
 func (r *KnowledgeBaseReconciler) finalizeEval(
@@ -354,6 +384,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	if err := r.statusUpdate(ctx, kb); err != nil {
 		return ctrl.Result{}, true, err
 	}
+	r.finalizeIngestionRun(ctx, kb.Namespace, job.Name, ragv1alpha1.IngestionRunFailed, 0, nil, "ingestion job failed")
 	r.deleteResult(ctx, kb.Namespace, job.Name)
 	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	return ctrl.Result{Requeue: true}, true, nil
@@ -391,6 +422,30 @@ func (r *KnowledgeBaseReconciler) startIngest(
 	if err := r.Create(ctx, job); err != nil {
 		return ctrl.Result{}, ignoreAlreadyExists(err)
 	}
+
+	// Create an immutable IngestionRun for auditing.
+	ir := &ragv1alpha1.IngestionRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      job.Name,
+			Namespace: kb.Namespace,
+			Labels:    map[string]string{labelKB: kb.Name, labelManagedBy: "kuberag"},
+		},
+		Spec: ragv1alpha1.IngestionRunSpec{
+			KnowledgeBaseRef:  ragv1alpha1.LocalObjectRef{Name: kb.Name},
+			Mode:              mode,
+			SpecHash:          hash,
+			EffectiveChunking: eff,
+		},
+		Status: ragv1alpha1.IngestionRunStatus{
+			Phase:     ragv1alpha1.IngestionRunRunning,
+			StartTime: &metav1.Time{Time: time.Now()},
+		},
+	}
+	_ = ctrl.SetControllerReference(kb, ir, r.Scheme)
+	if err := r.Create(ctx, ir); err != nil && !apierrors.IsAlreadyExists(err) {
+		return ctrl.Result{}, err
+	}
+	r.pruneIngestionRuns(ctx, kb.Namespace, kb.Name)
 
 	kb.Status.Phase = ragv1alpha1.PhaseIngesting
 	kb.Status.ActiveJob = job.Name

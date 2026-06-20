@@ -60,6 +60,7 @@ rules:
 - apiGroups:
   - rag.furkan.dev
   resources:
+  - ingestionruns
   - knowledgebases
   - retrievers
   - vectorindices
@@ -74,16 +75,17 @@ rules:
 - apiGroups:
   - rag.furkan.dev
   resources:
-  - knowledgebases/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - rag.furkan.dev
-  resources:
+  - ingestionruns/status
   - knowledgebases/status
   - retrievers/status
   - vectorindices/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - rag.furkan.dev
+  resources:
+  - knowledgebases/finalizers
+  verbs:
   - update

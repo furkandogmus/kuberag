@@ -1,0 +1,159 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: ingestionruns.rag.furkan.dev
+spec:
+  group: rag.furkan.dev
+  names:
+    kind: IngestionRun
+    listKind: IngestionRunList
+    plural: ingestionruns
+    shortNames:
+    - ir
+    singular: ingestionrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.knowledgeBaseRef.name
+      name: KB
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.totalChunks
+      name: Chunks
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          IngestionRun is an immutable record of a single ingestion attempt.
+          Created by the KnowledgeBase controller at the start of each ingest and
+          updated with the result. Owned by the KnowledgeBase for garbage collection.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: IngestionRunSpec captures the configuration that triggered
+              this run.
+            properties:
+              effectiveChunking:
+                description: EffectiveChunking is the chunking config used for this
+                  run.
+                properties:
+                  maxTokens:
+                    default: 800
+                    minimum: 1
+                    type: integer
+                  overlap:
+                    default: 80
+                    minimum: 0
+                    type: integer
+                  strategy:
+                    default: semantic
+                    description: ChunkingStrategy enumerates how documents get split.
+                    enum:
+                    - semantic
+                    - recursive
+                    - fixed
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: overlap must be strictly less than maxTokens
+                  rule: self.overlap < self.maxTokens
+              knowledgeBaseRef:
+                description: KnowledgeBaseRef names the owning KnowledgeBase.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              mode:
+                description: Mode is the ingestion mode used (full or incremental).
+                enum:
+                - full
+                - incremental
+                type: string
+              specHash:
+                description: SpecHash is the spec fingerprint at the time the run
+                  started.
+                type: string
+            required:
+            - effectiveChunking
+            - knowledgeBaseRef
+            - mode
+            - specHash
+            type: object
+          status:
+            description: IngestionRunStatus records the outcome of this run.
+            properties:
+              completionTime:
+                description: CompletionTime is when the run finished (success or failure).
+                format: date-time
+                type: string
+              error:
+                description: Error holds the failure reason when Phase=Failed.
+                type: string
+              phase:
+                description: Phase is the terminal state.
+                enum:
+                - Running
+                - Succeeded
+                - Failed
+                type: string
+              sources:
+                description: Sources records per-source ingestion results.
+                items:
+                  description: SourceStatus tracks the last-synced fingerprint per
+                    source for incremental sync.
+                  properties:
+                    chunks:
+                      type: integer
+                    name:
+                      type: string
+                    revision:
+                      description: Revision is the source-specific marker last ingested
+                        (git SHA, S3 ETag set hash, crawl hash).
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              startTime:
+                description: StartTime is when the run was created.
+                format: date-time
+                type: string
+              totalChunks:
+                description: TotalChunks is the number of chunks indexed by this run.
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
