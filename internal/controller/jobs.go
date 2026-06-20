@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,7 +37,7 @@ const (
 func jobType(j *batchv1.Job) string { return j.Labels[labelJobType] }
 
 // resultConfigMapName is where the worker writes its structured result.
-func resultConfigMapName(jobName string) string { return jobName + "-result" }
+func resultConfigMapName(jobName string) string { return nameWithSuffix(jobName, "-result") }
 
 // IngestResult is the JSON the ingestion worker writes to its result ConfigMap.
 type IngestResult struct {
@@ -164,7 +165,7 @@ func resourceRequirements(rr *ragv1alpha1.ResourceRequirements) (corev1.Resource
 }
 
 // specConfigMapName returns the ConfigMap name for the worker spec mount.
-func specConfigMapName(jobName string) string { return jobName + "-spec" }
+func specConfigMapName(jobName string) string { return nameWithSuffix(jobName, "-spec") }
 
 // specConfigMap builds a ConfigMap holding the serialised spec for the worker.
 func specConfigMap(ns, name, specJSON string) *corev1.ConfigMap {
@@ -221,6 +222,13 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, specCMName
 			TTLSecondsAfterFinished: &ttl,
 			ActiveDeadlineSeconds:   ptr.To(int64(7200)), // 2h hard timeout
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						labelManagedBy: "kuberag",
+						labelKB:        kb.Name,
+						labelJobType:   jobTypeLabel,
+					},
+				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					ServiceAccountName:            sa,
@@ -335,6 +343,14 @@ func truncName(name string) string {
 		return name[:63]
 	}
 	return name
+}
+
+func nameWithSuffix(name, suffix string) string {
+	maxBase := 63 - len(suffix)
+	if len(name) > maxBase {
+		name = strings.TrimRight(name[:maxBase], "-")
+	}
+	return name + suffix
 }
 
 func defaultInt(v, def int) int {

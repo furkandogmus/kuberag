@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,6 +108,43 @@ func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 	}
 	if got := jobEffectiveChunking(job, currentEff); got != jobEff {
 		t.Fatalf("expected job chunking %+v, got %+v", jobEff, got)
+	}
+}
+
+func TestActiveIngestStalenessUsesJobHash(t *testing.T) {
+	kb := baseKB()
+	currentHash := specHash(kb, "")
+	job, _, err := buildIngestJob(kb, currentHash, ragv1alpha1.IngestFull, effectiveChunking(kb))
+	if err != nil {
+		t.Fatalf("buildIngestJob returned error: %v", err)
+	}
+
+	if activeIngestIsStale(job, currentHash, "previous-hash") {
+		t.Fatal("new ingest for the desired spec must not be cancelled because the last completed hash is old")
+	}
+	job.Labels[labelSpecHash] = "previous-hash"
+	if !activeIngestIsStale(job, currentHash, "previous-hash") {
+		t.Fatal("ingest created for an older spec should be cancelled")
+	}
+}
+
+func TestIngestFailureRetryCooldown(t *testing.T) {
+	kb := baseKB()
+	hash := specHash(kb, "")
+	now := time.Now()
+	failedAt := metav1.NewTime(now.Add(-time.Minute))
+	kb.Status.Phase = ragv1alpha1.PhaseFailed
+	kb.Status.LastFailedSpecHash = hash
+	kb.Status.LastFailureTime = &failedAt
+
+	if got := ingestFailureRetryAfter(kb, hash, now); got != 4*time.Minute {
+		t.Fatalf("retryAfter=%s, want 4m", got)
+	}
+	if got := ingestFailureRetryAfter(kb, "changed-spec", now); got != 0 {
+		t.Fatalf("spec change should bypass cooldown, got %s", got)
+	}
+	if got := ingestFailureRetryAfter(kb, hash, now.Add(5*time.Minute)); got != 0 {
+		t.Fatalf("expired cooldown should allow retry, got %s", got)
 	}
 }
 
@@ -672,6 +710,18 @@ func TestInvalidIngestionResourcesReturnError(t *testing.T) {
 
 	if _, _, err := buildIngestJob(kb, "hash123", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
 		t.Fatal("expected invalid ingestion resources to return an error")
+	}
+}
+
+func TestConfigMapNamesPreserveSuffixWithinDNSLimit(t *testing.T) {
+	jobName := strings.Repeat("a", 63)
+	for _, got := range []string{resultConfigMapName(jobName), specConfigMapName(jobName)} {
+		if len(got) > 63 {
+			t.Fatalf("generated ConfigMap name exceeds DNS label limit: %q", got)
+		}
+		if !strings.HasSuffix(got, "-result") && !strings.HasSuffix(got, "-spec") {
+			t.Fatalf("generated ConfigMap name lost suffix: %q", got)
+		}
 	}
 }
 

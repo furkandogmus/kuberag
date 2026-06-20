@@ -44,7 +44,9 @@ The desired knowledge state.
 
 - **github**: `repo` (`owner/name`), `ref`, `includeGlobs[]` (gitignore-style, `**` aware), `tokenSecretRef`.
 - **s3**: `bucket`, `prefix`, `region`, `endpoint` (for MinIO/compatible), `includeGlobs[]`, `accessKeySecretRef`, `secretKeySecretRef`.
-- **web**: `urls[]`, `maxDepth` (default 1), `sameDomainOnly` (default true), `maxPages` (default 200).
+- **web**: `urls[]`, `maxDepth` (default 1), `sameDomainOnly` (default true),
+  `maxPages` (default 200), `allowPrivateNetworks` (default false; explicit
+  opt-in for cluster-internal/private targets).
 
 #### retrievalQuality
 
@@ -65,6 +67,7 @@ The desired knowledge state.
 override), `autoTuneAttempts`, `bestChunking` / `bestRecallPercent` (best config
 auto-tune observed; the KB is reverted here if the target is never met),
 `pendingRetune` (an auto-tune re-index is owed), `evalRound`, `lastIndexedTime`,
+`lastFailedSpecHash` / `lastFailureTime` (five-minute failed-ingest cooldown),
 `indexedChunks`,
 `sources[]` (per-source revision + chunk count), `evaluation`
 (`recallPercent`, `p95LatencyMillis`, `queries`, `time`), `activeJob`,

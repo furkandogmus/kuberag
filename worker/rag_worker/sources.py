@@ -3,8 +3,10 @@ marker the operator stores so unchanged sources can be skipped on the next run."
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
+import socket
 import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
@@ -296,6 +298,49 @@ def _web_hostname(url: str) -> str:
     return (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
 
 
+def _resolve_web_addresses(hostname: str) -> set[str]:
+    return {
+        item[4][0]
+        for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    }
+
+
+def _validate_web_target(url: str, allow_private: bool) -> None:
+    if allow_private:
+        return
+    hostname = _web_hostname(url)
+    try:
+        addresses = _resolve_web_addresses(hostname)
+    except socket.gaierror as exc:
+        raise RuntimeError(f"web crawl DNS resolution failed for {hostname}: {exc}") from exc
+    if not addresses:
+        raise RuntimeError(f"web crawl DNS resolution returned no addresses for {hostname}")
+    if any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise RuntimeError(f"web crawl target resolves to a non-public address: {hostname}")
+
+
+def _request_web_page(requests, url: str, allow_private: bool):
+    current = url
+    for _ in range(6):
+        _validate_web_target(current, allow_private)
+        response = requests.get(
+            current,
+            timeout=15,
+            headers={"User-Agent": "kuberag/1.0"},
+            allow_redirects=False,
+        )
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response, current
+        location = response.headers.get("location")
+        if not location:
+            raise RuntimeError(f"web crawl redirect has no Location header: {current}")
+        target = _normalize_web_url(urllib.parse.urljoin(current, location))
+        if target is None:
+            raise RuntimeError(f"web crawl redirected to an invalid URL: {current}")
+        current = target
+    raise RuntimeError(f"web crawl exceeded redirect limit: {url}")
+
+
 def fetch_web(src: dict) -> SourceDocs:
     import requests
 
@@ -304,6 +349,7 @@ def fetch_web(src: dict) -> SourceDocs:
     max_depth = web.get("maxDepth", 1)
     same_domain = web.get("sameDomainOnly", True)
     max_pages = web.get("maxPages", 200)
+    allow_private = web.get("allowPrivateNetworks", False)
 
     normalized_seeds = [url for seed in seeds if (url := _normalize_web_url(seed)) is not None]
     seed_urls = set(normalized_seeds)
@@ -323,7 +369,7 @@ def fetch_web(src: dict) -> SourceDocs:
         seen.add(url)
         fetched_pages += 1
         try:
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "kuberag/1.0"})
+            resp, requested_url = _request_web_page(requests, url, allow_private)
         except requests.RequestException as exc:
             raise RuntimeError(f"web crawl request failed for {url}: {exc}") from exc
         if resp.status_code != 200:
@@ -335,11 +381,12 @@ def fetch_web(src: dict) -> SourceDocs:
                 raise RuntimeError(f"web crawl seed is not HTML: {url}")
             continue
 
-        final_url = _normalize_web_url(resp.url)
+        final_url = _normalize_web_url(resp.url or requested_url)
         if final_url is None:
             if url in seed_urls:
                 raise RuntimeError(f"web crawl seed redirected to an invalid URL: {url}")
             continue
+        _validate_web_target(final_url, allow_private)
         if same_domain and _web_hostname(final_url) not in seed_domains:
             if url in seed_urls:
                 raise RuntimeError(f"web crawl seed redirected outside allowed domains: {url}")

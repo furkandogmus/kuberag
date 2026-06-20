@@ -101,6 +101,11 @@ type WebSource struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxPages int `json:"maxPages,omitempty"`
+	// AllowPrivateNetworks permits crawling private, loopback, link-local and
+	// other non-public addresses. Keep false for untrusted KnowledgeBases.
+	// +kubebuilder:default=false
+	// +optional
+	AllowPrivateNetworks bool `json:"allowPrivateNetworks,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +384,13 @@ type KnowledgeBaseStatus struct {
 	// ObservedSpecHash fingerprints the re-ingest-relevant spec fields.
 	// +optional
 	ObservedSpecHash string `json:"observedSpecHash,omitempty"`
+	// LastFailedSpecHash fingerprints the spec used by the most recent failed
+	// ingestion. It prevents Job events from causing an immediate retry loop.
+	// +optional
+	LastFailedSpecHash string `json:"lastFailedSpecHash,omitempty"`
+	// LastFailureTime is when the most recent ingestion failed.
+	// +optional
+	LastFailureTime *metav1.Time `json:"lastFailureTime,omitempty"`
 	// ObservedEmbeddingModel is the model used for the data currently in the store.
 	// +optional
 	ObservedEmbeddingModel string `json:"observedEmbeddingModel,omitempty"`

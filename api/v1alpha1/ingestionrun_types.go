@@ -15,6 +15,7 @@ const (
 )
 
 // IngestionRunSpec captures the configuration that triggered this run.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 type IngestionRunSpec struct {
 	// KnowledgeBaseRef names the owning KnowledgeBase.
 	KnowledgeBaseRef LocalObjectRef `json:"knowledgeBaseRef"`
@@ -50,7 +51,6 @@ type IngestionRunStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ir
-// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.phase) || self.status.phase == 'Running' || oldSelf.status.phase == self.status.phase || oldSelf.status.phase == 'Running'",message="spec is immutable; only status.phase may transition from Running to Succeeded/Failed"
 // +kubebuilder:printcolumn:name="KB",type=string,JSONPath=`.spec.knowledgeBaseRef.name`
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`

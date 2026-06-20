@@ -61,8 +61,8 @@ class VectorStore(ABC):
         """
         return False  # default: not supported
 
-    def create_physical(self, dim: int, distance: str, round_num: int) -> str:
-        """Create a versioned physical collection. Returns the physical name."""
+    def staging_name(self, round_num: int) -> str:
+        """Return a versioned staging collection name."""
         return f"{self.collection}-v{round_num}"
 
     def close(self) -> None:
@@ -108,7 +108,7 @@ class QdrantStore(VectorStore):
         # Also resolve aliases — collection_exists returns True for aliases.
         return self.client.collection_exists(self.collection)
 
-    def _physical_name(self, version: int) -> str:
+    def staging_name(self, version: int) -> str:
         return f"{self.collection}-v{version}"
 
     def _ensure_alias(self, physical: str) -> None:
@@ -145,7 +145,7 @@ class QdrantStore(VectorStore):
             return
 
         # Nothing exists. Create v1 physical + alias.
-        v1 = self._physical_name(1)
+        v1 = self.staging_name(1)
         self.client.create_collection(
             collection_name=v1,
             vectors_config=models.VectorParams(size=dim, distance=self._distance()),
@@ -154,29 +154,14 @@ class QdrantStore(VectorStore):
         self._ensure_payload_indexes()
 
     def recreate_collection(self, dim: int, distance: str) -> None:
-        """Create a new physical collection and point the alias at it."""
+        """Recreate this exact physical collection."""
         from qdrant_client import models
 
-        round_num = int(os.environ.get("INGEST_ROUND", "1"))
-        physical = self._physical_name(round_num)
         self.client.recreate_collection(
-            collection_name=physical,
+            collection_name=self.collection,
             vectors_config=models.VectorParams(size=dim, distance=self._distance()),
         )
-        self._ensure_alias(physical)
         self._ensure_payload_indexes()
-
-    def create_physical(self, dim: int, distance: str, round_num: int) -> str:
-        """Create a versioned physical collection without pointing the alias.
-        Returns the physical collection name for later swap_collection."""
-        from qdrant_client import models
-
-        physical = self._physical_name(round_num)
-        self.client.recreate_collection(
-            collection_name=physical,
-            vectors_config=models.VectorParams(size=dim, distance=self._distance()),
-        )
-        return physical
 
     def _ensure_payload_indexes(self) -> None:
         from qdrant_client import models
@@ -290,28 +275,61 @@ class QdrantStore(VectorStore):
         return [{"score": 1.0, "payload": r.payload} for r in res]
 
     def drop(self) -> None:
-        if self._exists():
+        aliases = self.client.get_aliases().aliases
+        target = next(
+            (alias.collection_name for alias in aliases if alias.alias_name == self.collection),
+            None,
+        )
+        if target is not None:
+            from qdrant_client import models
+
+            self.client.update_collection_aliases(
+                change_aliases_operations=[
+                    models.DeleteAliasOperation(
+                        delete_alias=models.DeleteAlias(alias_name=self.collection)
+                    )
+                ]
+            )
+            if self.client.collection_exists(target):
+                self.client.delete_collection(target)
+            return
+        if self.client.collection_exists(self.collection):
             self.client.delete_collection(self.collection)
 
     def swap_collection(self, shadow_name: str) -> bool:
-        """Qdrant: promote shadow via alias. Drops old physical collection first
-        (the shadow already contains all verified data, so this is lossless)."""
+        """Qdrant: atomically repoint an existing alias to the staging collection."""
         from qdrant_client import models
 
-        # If a physical collection with the active name exists, drop it so the
-        # alias can be created. The shadow already holds the verified data.
-        if self._exists():
-            self.client.delete_collection(self.collection)
-        self.client.update_collection_aliases(
-            change_aliases_operations=[
-                models.CreateAliasOperation(
-                    create_alias=models.CreateAlias(
-                        collection_name=shadow_name,
-                        alias_name=self.collection,
-                    )
-                )
-            ]
+        aliases = self.client.get_aliases().aliases
+        current_target = next(
+            (alias.collection_name for alias in aliases if alias.alias_name == self.collection),
+            None,
         )
+        alias_exists = current_target is not None
+        operations = []
+        if alias_exists:
+            operations.append(
+                models.DeleteAliasOperation(
+                    delete_alias=models.DeleteAlias(alias_name=self.collection)
+                )
+            )
+        elif self.client.collection_exists(self.collection):
+            # One-time migration from the legacy physical-name layout. Qdrant
+            # cannot use a collection and alias with the same name.
+            self.client.delete_collection(self.collection)
+        operations.append(
+            models.CreateAliasOperation(
+                create_alias=models.CreateAlias(
+                    collection_name=shadow_name,
+                    alias_name=self.collection,
+                )
+            )
+        )
+        self.client.update_collection_aliases(
+            change_aliases_operations=operations
+        )
+        if current_target and current_target != shadow_name and self.client.collection_exists(current_target):
+            self.client.delete_collection(current_target)
         return True
 
     def close(self) -> None:
@@ -484,21 +502,32 @@ class MilvusStore(VectorStore):
         self.client = MilvusClient(uri=endpoint, token=token)
 
     def ensure_collection(self, dim: int, distance: str) -> None:
-        if not self.client.has_collection(self.collection):
-            self.client.create_collection(
-                collection_name=self.collection,
-                dimension=dim,
-                metric_type=self._METRIC[self.distance],
-                auto_id=False,
-                primary_field_name="id",
-                id_type="string",
-                max_length=128,
-            )
+        try:
+            self.client.describe_alias(self.collection)
+            return
+        except Exception:
+            pass
+        if self.client.has_collection(self.collection):
+            return
+        physical = self.staging_name(1)
+        self._create_collection(physical, dim)
+        self.client.create_alias(collection_name=physical, alias=self.collection)
+
+    def _create_collection(self, collection: str, dim: int) -> None:
+        self.client.create_collection(
+            collection_name=collection,
+            dimension=dim,
+            metric_type=self._METRIC[self.distance],
+            auto_id=False,
+            primary_field_name="id",
+            id_type="string",
+            max_length=128,
+        )
 
     def recreate_collection(self, dim: int, distance: str) -> None:
         if self.client.has_collection(self.collection):
             self.client.drop_collection(self.collection)
-        self.ensure_collection(dim, distance)
+        self._create_collection(self.collection, dim)
 
     def delete_by_source(self, source_name: str) -> None:
         self.client.delete(self.collection, filter=f'source == "{source_name}"')
@@ -584,16 +613,30 @@ class MilvusStore(VectorStore):
         return [{"score": 1.0, "payload": h} for h in res]
 
     def drop(self) -> None:
+        try:
+            description = self.client.describe_alias(self.collection)
+            target = description.get("collection_name")
+            self.client.drop_alias(self.collection)
+            if target and self.client.has_collection(target):
+                self.client.drop_collection(target)
+            return
+        except Exception:
+            pass
         if self.client.has_collection(self.collection):
             self.client.drop_collection(self.collection)
 
     def swap_collection(self, shadow_name: str) -> bool:
         """Milvus: promote shadow via alter_alias."""
         try:
-            self.client.alter_alias(
-                collection_name=shadow_name,
-                alias=self.collection,
-            )
+            try:
+                current = self.client.describe_alias(self.collection).get("collection_name")
+                self.client.alter_alias(collection_name=shadow_name, alias=self.collection)
+                if current and current != shadow_name and self.client.has_collection(current):
+                    self.client.drop_collection(current)
+            except Exception:
+                if self.client.has_collection(self.collection):
+                    self.client.drop_collection(self.collection)
+                self.client.create_alias(collection_name=shadow_name, alias=self.collection)
             return True
         except Exception:
             return False

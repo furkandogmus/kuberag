@@ -75,7 +75,7 @@ The `KnowledgeBase` reconciler is a level-triggered state machine. Each pass:
 `buildIngestJob` renders a Job running `python -m rag_worker ingest`. The Job:
 
 - runs under a dedicated worker ServiceAccount (least privilege: ConfigMaps only);
-- receives the spec as `KB_SPEC_JSON`, the prior per-source revisions as
+- receives the spec through a mounted ConfigMap, the prior per-source revisions as
   `PRIOR_SOURCES_JSON`, and `INGEST_MODE` (`full` or `incremental`);
 - has secret-backed env injected for source/store/embedding credentials;
 - is resource-bounded (defaults: 1Gi request / 4Gi limit — ONNX + batches);
@@ -89,7 +89,9 @@ unchanged). Any spec change, model change, or first run forces `full`.
 **Incremental skip.** The worker computes a cheap revision per source
 (`git ls-remote` SHA, sorted S3 ETags, crawl content hash). If it matches the
 revision the operator last recorded and the mode is incremental, the source's
-chunks are left untouched.
+chunks are left untouched. If any source changed, the worker performs a full
+rebuild through a versioned staging collection and atomically promotes it; it
+never deletes live source points before the replacement is verified.
 
 **Streaming.** Chunks are embedded and upserted in bounded batches via a
 generator, so peak memory is one batch regardless of corpus size.
@@ -150,6 +152,11 @@ step gets a unique name — even before `ttlSecondsAfterFinished` (300s) expires
 
 On completion the operator immediately deletes the finished Job (rather than
 relying on TTL), so the next run always gets a clean slate.
+
+After a terminal ingestion failure, the operator records the failed spec hash
+and waits five minutes before retrying it. Job deletion/status events therefore
+cannot create a hot retry loop; changing the spec or referenced secret bypasses
+the cooldown immediately.
 
 ## Web crawl hardening
 

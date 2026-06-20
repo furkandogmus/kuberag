@@ -25,6 +25,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
@@ -38,6 +39,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd")},
 		ErrorIfCRDPathMissing: true,
@@ -213,6 +215,20 @@ func TestKnowledgeBaseReconcileLifecycle(t *testing.T) {
 		return nil
 	})
 
+	eventually(t, 15*time.Second, func() error {
+		var run ragv1alpha1.IngestionRun
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: jobName}, &run); err != nil {
+			return err
+		}
+		if run.Status.Phase != ragv1alpha1.IngestionRunRunning {
+			return fmt.Errorf("ingestion run phase=%s, want Running", run.Status.Phase)
+		}
+		if run.Status.StartTime == nil {
+			return fmt.Errorf("ingestion run startTime not set")
+		}
+		return nil
+	})
+
 	// Drive the job to completion and publish a result.
 	completeJob(t, ns, jobName, `{"totalChunks":42,"sources":[{"name":"docs","revision":"abc123","chunks":42}]}`)
 
@@ -235,6 +251,20 @@ func TestKnowledgeBaseReconcileLifecycle(t *testing.T) {
 	})
 
 	eventually(t, 15*time.Second, func() error {
+		var run ragv1alpha1.IngestionRun
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: jobName}, &run); err != nil {
+			return err
+		}
+		if run.Status.Phase != ragv1alpha1.IngestionRunSucceeded {
+			return fmt.Errorf("ingestion run phase=%s, want Succeeded", run.Status.Phase)
+		}
+		if run.Status.TotalChunks != 42 {
+			return fmt.Errorf("ingestion run totalChunks=%d, want 42", run.Status.TotalChunks)
+		}
+		return nil
+	})
+
+	eventually(t, 15*time.Second, func() error {
 		var job batchv1.Job
 		err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: jobName}, &job)
 		if apierrors.IsNotFound(err) {
@@ -242,9 +272,45 @@ func TestKnowledgeBaseReconcileLifecycle(t *testing.T) {
 		}
 		return fmt.Errorf("completed ingestion job still present (err=%v)", err)
 	})
+
+	// A spec edit starts one replacement ingest and keeps it alive across the
+	// Job-created reconcile even though ObservedSpecHash still names the last
+	// completed spec.
+	if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), kb); err != nil {
+		t.Fatalf("refresh kb before spec edit: %v", err)
+	}
+	kb.Spec.Chunking.MaxTokens++
+	if err := k8sClient.Update(testCtx, kb); err != nil {
+		t.Fatalf("update kb chunking: %v", err)
+	}
+	var replacementName string
+	eventually(t, 15*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.ActiveJob == "" {
+			return fmt.Errorf("replacement ingest not started")
+		}
+		replacementName = got.Status.ActiveJob
+		var replacement batchv1.Job
+		return k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: replacementName}, &replacement)
+	})
+	time.Sleep(500 * time.Millisecond)
+	var got ragv1alpha1.KnowledgeBase
+	if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+		t.Fatalf("read kb after replacement reconcile: %v", err)
+	}
+	if got.Status.ActiveJob != replacementName {
+		t.Fatalf("replacement ingest churned: activeJob=%q, want %q", got.Status.ActiveJob, replacementName)
+	}
+	var replacement batchv1.Job
+	if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: replacementName}, &replacement); err != nil {
+		t.Fatalf("replacement ingest was deleted: %v", err)
+	}
 }
 
-func TestFailedIngestionAdvancesToUniqueRetryName(t *testing.T) {
+func TestFailedIngestionWaitsAndSpecChangeAdvancesToUniqueRetryName(t *testing.T) {
 	ns := newNamespace(t)
 	kb := sampleKB(ns, "failed-ingest")
 	if err := k8sClient.Create(testCtx, kb); err != nil {
@@ -277,44 +343,56 @@ func TestFailedIngestionAdvancesToUniqueRetryName(t *testing.T) {
 	if err := k8sClient.Status().Update(testCtx, &job); err != nil {
 		t.Fatalf("mark job failed: %v", err)
 	}
-	if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(&job), &job); err != nil {
-		t.Fatalf("read failed job: %v", err)
-	}
-	if !jobFailed(&job) {
-		t.Fatalf("failed condition not persisted: %#v", job.Status.Conditions)
-	}
-	r := &KnowledgeBaseReconciler{Client: k8sClient}
-	eventually(t, 10*time.Second, func() error {
-		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), kb); err != nil {
+	previousName := job.Name
+	eventually(t, 15*time.Second, func() error {
+		var run ragv1alpha1.IngestionRun
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: previousName}, &run); err != nil {
 			return err
 		}
-		_, _, err := r.finalizeIngest(testCtx, kb, &job, effectiveChunking(kb), specHash(kb, ""))
-		return err
-	})
-
-	eventually(t, 10*time.Second, func() error {
-		var got ragv1alpha1.KnowledgeBase
-		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
-			return err
-		}
-		if got.Status.Phase != ragv1alpha1.PhaseFailed {
-			return fmt.Errorf("phase=%s, want Failed", got.Status.Phase)
+		if run.Status.Phase != ragv1alpha1.IngestionRunFailed {
+			return fmt.Errorf("ingestion run phase=%s, want Failed", run.Status.Phase)
 		}
 		return nil
 	})
 
-	if kb.Status.IngestRound == 0 {
-		t.Fatal("expected ingestion round to be recorded")
+	eventually(t, 15*time.Second, func() error {
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), kb); err != nil {
+			return err
+		}
+		if kb.Status.Phase != ragv1alpha1.PhaseFailed {
+			return fmt.Errorf("phase=%s, want Failed", kb.Status.Phase)
+		}
+		if kb.Status.ActiveJob != "" {
+			return fmt.Errorf("failed ingestion retried immediately as %q", kb.Status.ActiveJob)
+		}
+		if kb.Status.LastFailureTime == nil || kb.Status.LastFailedSpecHash == "" {
+			return fmt.Errorf("failure cooldown status not recorded")
+		}
+		return nil
+	})
+	time.Sleep(500 * time.Millisecond)
+	if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), kb); err != nil {
+		t.Fatalf("read failed kb: %v", err)
 	}
-	previousName := job.Name
-	kb.Status.IngestRound++
-	retry, _, err := buildIngestJob(kb, specHash(kb, ""), ragv1alpha1.IngestFull, effectiveChunking(kb))
-	if err != nil {
-		t.Fatalf("build retry job: %v", err)
+	if kb.Status.ActiveJob != "" {
+		t.Fatalf("failed ingestion entered a hot retry loop with %q", kb.Status.ActiveJob)
 	}
-	if retry.Name == previousName {
-		t.Fatalf("retry job name collided with failed job %q", previousName)
+
+	kb.Spec.Chunking.MaxTokens++
+	if err := k8sClient.Update(testCtx, kb); err != nil {
+		t.Fatalf("change failed ingestion spec: %v", err)
 	}
+	eventually(t, 15*time.Second, func() error {
+		var got ragv1alpha1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(kb), &got); err != nil {
+			return err
+		}
+		if got.Status.ActiveJob == "" || got.Status.ActiveJob == previousName {
+			return fmt.Errorf("retry job not advanced: activeJob=%q", got.Status.ActiveJob)
+		}
+		var retry batchv1.Job
+		return k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: got.Status.ActiveJob}, &retry)
+	})
 }
 
 func TestKnowledgeBaseFinalizerCleanup(t *testing.T) {

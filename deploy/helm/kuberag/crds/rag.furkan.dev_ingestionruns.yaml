@@ -109,6 +109,9 @@ spec:
             - mode
             - specHash
             type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
           status:
             description: IngestionRunStatus records the outcome of this run.
             properties:

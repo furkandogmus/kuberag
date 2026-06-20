@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- range $namespace := .Values.worker.namespaces }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kuberag.fullname" $ }}-worker
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "kuberag.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: rag.furkan.dev/job-type
+        operator: Exists
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 443, protocol: TCP }
+        - { port: 6333, protocol: TCP }
+        - { port: 6334, protocol: TCP }
+        - { port: 5432, protocol: TCP }
+        - { port: 19530, protocol: TCP }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - { port: 443, protocol: TCP }
+        - { port: 80, protocol: TCP }
+{{- end }}
+{{- end }}

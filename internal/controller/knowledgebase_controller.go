@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -29,8 +30,9 @@ import (
 )
 
 const (
-	finalizer = "rag.furkan.dev/finalizer"
-	ownerKey  = ".metadata.controller"
+	finalizer               = "rag.furkan.dev/finalizer"
+	ownerKey                = ".metadata.controller"
+	ingestFailureRetryDelay = 5 * time.Minute
 )
 
 // KnowledgeBaseReconciler reconciles a KnowledgeBase object.
@@ -114,7 +116,7 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		var active batchv1.Job
 		key := types.NamespacedName{Namespace: kb.Namespace, Name: kb.Status.ActiveJob}
 		if err := r.Get(ctx, key, &active); err == nil {
-			if jobType(&active) == jobTypeIngest && kb.Status.ObservedSpecHash != "" && kb.Status.ObservedSpecHash != hash {
+			if activeIngestIsStale(&active, hash, kb.Status.ObservedSpecHash) {
 				logger.Info("cancelling stale ingest job due to spec change", "job", active.Name)
 				r.event(&kb, corev1.EventTypeNormal, "IngestionCancelled",
 					"spec changed; cancelling in-flight ingest %s", active.Name)
@@ -132,6 +134,9 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err != nil || handled {
 			return res, err
 		}
+	}
+	if retryAfter := ingestFailureRetryAfter(&kb, hash, time.Now()); retryAfter > 0 {
+		return ctrl.Result{RequeueAfter: retryAfter}, nil
 	}
 
 	// 1) Ingestion takes priority over evaluation.
@@ -189,6 +194,9 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	if jobFailed(job) {
 		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		kb.Status.ActiveJob = ""
+		now := metav1.Now()
+		kb.Status.LastFailedSpecHash = hash
+		kb.Status.LastFailureTime = &now
 		ingestionsTotal.WithLabelValues(kb.Name, "failed").Inc()
 		setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse, "IngestionFailed", "ingestion job failed")
 		setCondition(kb, ragv1alpha1.ConditionIngesting, metav1.ConditionFalse, "Failed", "ingestion job failed")
@@ -196,6 +204,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		if err := r.statusUpdate(ctx, kb); err != nil {
 			return ctrl.Result{}, true, err
 		}
+		r.finalizeIngestionRun(ctx, kb.Namespace, job.Name, ragv1alpha1.IngestionRunFailed, 0, nil, "ingestion job failed")
 		r.deleteResult(ctx, kb.Namespace, job.Name)
 		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 		r.deleteJob(ctx, job)
@@ -210,6 +219,8 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 
 	kb.Status.Phase = ragv1alpha1.PhaseReady
 	kb.Status.ObservedSpecHash = hash
+	kb.Status.LastFailedSpecHash = ""
+	kb.Status.LastFailureTime = nil
 	kb.Status.ObservedEmbeddingModel = kb.Spec.Embedding.Model
 	emb := kb.Spec.Embedding.DeepCopy()
 	kb.Status.ObservedEmbedding = emb
@@ -249,7 +260,9 @@ func (r *KnowledgeBaseReconciler) finalizeIngestionRun(ctx context.Context, ns, 
 	ir.Status.TotalChunks = chunks
 	ir.Status.Sources = toSourceStatus(sources)
 	ir.Status.Error = errMsg
-	_ = r.Status().Update(ctx, &ir)
+	if err := r.Status().Update(ctx, &ir); err != nil {
+		log.FromContext(ctx).Error(err, "failed to finalize ingestion run", "ingestionRun", name)
+	}
 }
 
 func (r *KnowledgeBaseReconciler) pruneIngestionRuns(ctx context.Context, ns, kbName string) {
@@ -257,15 +270,22 @@ func (r *KnowledgeBaseReconciler) pruneIngestionRuns(ctx context.Context, ns, kb
 	if err := r.List(ctx, &list, client.InNamespace(ns), client.MatchingLabels{labelKB: kbName}); err != nil {
 		return
 	}
-	if len(list.Items) <= 10 {
+	var terminal []ragv1alpha1.IngestionRun
+	for i := range list.Items {
+		if list.Items[i].Status.Phase == ragv1alpha1.IngestionRunSucceeded ||
+			list.Items[i].Status.Phase == ragv1alpha1.IngestionRunFailed {
+			terminal = append(terminal, list.Items[i])
+		}
+	}
+	if len(terminal) <= 10 {
 		return
 	}
 	// Sort by creation timestamp ascending so we delete oldest first.
-	sort.Slice(list.Items, func(i, j int) bool {
-		return list.Items[i].CreationTimestamp.Before(&list.Items[j].CreationTimestamp)
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminal[i].CreationTimestamp.Before(&terminal[j].CreationTimestamp)
 	})
-	for i := 0; i < len(list.Items)-10; i++ {
-		_ = r.Delete(ctx, &list.Items[i])
+	for i := 0; i < len(terminal)-10; i++ {
+		_ = r.Delete(ctx, &terminal[i])
 	}
 }
 
@@ -390,7 +410,6 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	if err := r.statusUpdate(ctx, kb); err != nil {
 		return ctrl.Result{}, true, err
 	}
-	r.finalizeIngestionRun(ctx, kb.Namespace, job.Name, ragv1alpha1.IngestionRunFailed, 0, nil, "ingestion job failed")
 	r.deleteResult(ctx, kb.Namespace, job.Name)
 	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	return ctrl.Result{Requeue: true}, true, nil
@@ -442,14 +461,22 @@ func (r *KnowledgeBaseReconciler) startIngest(
 			SpecHash:          hash,
 			EffectiveChunking: eff,
 		},
-		Status: ragv1alpha1.IngestionRunStatus{
-			Phase:     ragv1alpha1.IngestionRunRunning,
-			StartTime: &metav1.Time{Time: time.Now()},
-		},
 	}
 	_ = ctrl.SetControllerReference(kb, ir, r.Scheme)
-	if err := r.Create(ctx, ir); err != nil && !apierrors.IsAlreadyExists(err) {
-		return ctrl.Result{}, err
+	if err := r.Create(ctx, ir); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return ctrl.Result{}, err
+		}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: ir.Name}, ir); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if ir.Status.Phase == "" {
+		ir.Status.Phase = ragv1alpha1.IngestionRunRunning
+		ir.Status.StartTime = &metav1.Time{Time: time.Now()}
+		if err := r.Status().Update(ctx, ir); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	r.pruneIngestionRuns(ctx, kb.Namespace, kb.Name)
 
@@ -564,7 +591,20 @@ func (r *KnowledgeBaseReconciler) ensureVectorIndex(ctx context.Context, kb *rag
 }
 
 func (r *KnowledgeBaseReconciler) statusUpdate(ctx context.Context, kb *ragv1alpha1.KnowledgeBase) error {
-	return r.Status().Update(ctx, kb)
+	desired := kb.Status.DeepCopy()
+	key := client.ObjectKeyFromObject(kb)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest ragv1alpha1.KnowledgeBase
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		latest.Status = *desired.DeepCopy()
+		if err := r.Status().Update(ctx, &latest); err != nil {
+			return err
+		}
+		kb.ResourceVersion = latest.ResourceVersion
+		return nil
+	})
 }
 
 func (r *KnowledgeBaseReconciler) event(obj runtime.Object, etype, reason, msg string, args ...any) {
@@ -872,12 +912,29 @@ func jobSpecHash(j *batchv1.Job, fallback string) string {
 	return fallback
 }
 
+func activeIngestIsStale(job *batchv1.Job, desiredHash, observedHash string) bool {
+	return jobType(job) == jobTypeIngest && jobSpecHash(job, observedHash) != desiredHash
+}
+
+func ingestFailureRetryAfter(kb *ragv1alpha1.KnowledgeBase, desiredHash string, now time.Time) time.Duration {
+	if kb.Status.Phase != ragv1alpha1.PhaseFailed ||
+		kb.Status.LastFailedSpecHash != desiredHash ||
+		kb.Status.LastFailureTime == nil {
+		return 0
+	}
+	remaining := kb.Status.LastFailureTime.Add(ingestFailureRetryDelay).Sub(now)
+	if remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
 func jobEffectiveChunking(j *batchv1.Job, fallback ragv1alpha1.ChunkingSpec) ragv1alpha1.ChunkingSpec {
 	if j.Labels == nil || j.Labels[labelChunking] == "" {
 		return fallback
 	}
 	var c ragv1alpha1.ChunkingSpec
-	parts := strings.SplitN(j.Labels[labelChunking], "|", 3)
+	parts := strings.SplitN(j.Labels[labelChunking], ".", 3)
 	if len(parts) == 3 {
 		c.Strategy = ragv1alpha1.ChunkingStrategy(parts[0])
 		_, _ = fmt.Sscanf(parts[1], "%d", &c.MaxTokens)
@@ -891,7 +948,7 @@ func jobEffectiveChunking(j *batchv1.Job, fallback ragv1alpha1.ChunkingSpec) rag
 
 // chunkingLabel serialises a chunking spec to a compact label value.
 func chunkingLabel(c ragv1alpha1.ChunkingSpec) string {
-	return fmt.Sprintf("%s|%d|%d", c.Strategy, c.MaxTokens, c.Overlap)
+	return fmt.Sprintf("%s.%d.%d", c.Strategy, c.MaxTokens, c.Overlap)
 }
 
 func setCondition(kb *ragv1alpha1.KnowledgeBase, condType string, status metav1.ConditionStatus, reason, msg string) {

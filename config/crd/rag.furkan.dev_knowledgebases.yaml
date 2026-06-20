@@ -1295,6 +1295,12 @@ spec:
                     web:
                       description: WebSource crawls one or more seed URLs.
                       properties:
+                        allowPrivateNetworks:
+                          default: false
+                          description: |-
+                            AllowPrivateNetworks permits crawling private, loopback, link-local and
+                            other non-public addresses. Keep false for untrusted KnowledgeBases.
+                          type: boolean
                         maxDepth:
                           default: 1
                           description: MaxDepth bounds link-following from each seed.
@@ -1556,6 +1562,15 @@ spec:
                   IngestRound increments for every ingestion attempt so retries never
                   collide with a still-present finished Job.
                 type: integer
+              lastFailedSpecHash:
+                description: |-
+                  LastFailedSpecHash fingerprints the spec used by the most recent failed
+                  ingestion. It prevents Job events from causing an immediate retry loop.
+                type: string
+              lastFailureTime:
+                description: LastFailureTime is when the most recent ingestion failed.
+                format: date-time
+                type: string
               lastIndexedTime:
                 format: date-time
                 type: string

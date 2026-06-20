@@ -111,6 +111,10 @@ spec:
                       built-in table for known models, otherwise auto-detected at ingest time.
                     minimum: 1
                     type: integer
+                  documentPrefix:
+                    description: 'DocumentPrefix prepends to every document before
+                      embedding (e.g. "passage: ").'
+                    type: string
                   model:
                     default: bge-small
                     description: Model name, e.g. "bge-small", "bge-large", "text-embedding-3-small".
@@ -128,6 +132,11 @@ spec:
                     - openai
                     - gemini
                     - openai-compatible
+                    type: string
+                  queryPrefix:
+                    description: |-
+                      QueryPrefix prepends to every query before embedding (e.g. "query: ").
+                      Useful for BGE/Instructor-style models that use instruction prefixes.
                     type: string
                 required:
                 - model
@@ -1286,6 +1295,12 @@ spec:
                     web:
                       description: WebSource crawls one or more seed URLs.
                       properties:
+                        allowPrivateNetworks:
+                          default: false
+                          description: |-
+                            AllowPrivateNetworks permits crawling private, loopback, link-local and
+                            other non-public addresses. Keep false for untrusted KnowledgeBases.
+                          type: boolean
                         maxDepth:
                           default: 1
                           description: MaxDepth bounds link-following from each seed.
@@ -1547,9 +1562,80 @@ spec:
                   IngestRound increments for every ingestion attempt so retries never
                   collide with a still-present finished Job.
                 type: integer
+              lastFailedSpecHash:
+                description: |-
+                  LastFailedSpecHash fingerprints the spec used by the most recent failed
+                  ingestion. It prevents Job events from causing an immediate retry loop.
+                type: string
+              lastFailureTime:
+                description: LastFailureTime is when the most recent ingestion failed.
+                format: date-time
+                type: string
               lastIndexedTime:
                 format: date-time
                 type: string
+              observedEmbedding:
+                description: |-
+                  ObservedEmbedding is the full embedding config of the indexed data.
+                  Used by the Retriever to query with the same provider/model/prefixes.
+                properties:
+                  apiKeySecretRef:
+                    description: APIKeySecretRef holds the provider API key when Provider
+                      != local.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  baseURL:
+                    description: |-
+                      BaseURL overrides the API base URL. Required for "openai-compatible";
+                      optional override for the other hosted providers.
+                    type: string
+                  dimension:
+                    description: |-
+                      Dimension overrides the vector dimension. If unset it is taken from a
+                      built-in table for known models, otherwise auto-detected at ingest time.
+                    minimum: 1
+                    type: integer
+                  documentPrefix:
+                    description: 'DocumentPrefix prepends to every document before
+                      embedding (e.g. "passage: ").'
+                    type: string
+                  model:
+                    default: bge-small
+                    description: Model name, e.g. "bge-small", "bge-large", "text-embedding-3-small".
+                    type: string
+                  provider:
+                    default: local
+                    description: |-
+                      Provider of the model:
+                        local            - run the model in-process via fastembed
+                        openai           - OpenAI embeddings API
+                        gemini           - Google Gemini embeddings (OpenAI-compatible endpoint)
+                        openai-compatible- any OpenAI-compatible /embeddings endpoint (set baseURL)
+                    enum:
+                    - local
+                    - openai
+                    - gemini
+                    - openai-compatible
+                    type: string
+                  queryPrefix:
+                    description: |-
+                      QueryPrefix prepends to every query before embedding (e.g. "query: ").
+                      Useful for BGE/Instructor-style models that use instruction prefixes.
+                    type: string
+                required:
+                - model
+                type: object
+                x-kubernetes-validations:
+                - message: baseURL is required when provider is openai-compatible
+                  rule: self.provider != 'openai-compatible' || (has(self.baseURL)
+                    && size(self.baseURL) > 0)
               observedEmbeddingModel:
                 description: ObservedEmbeddingModel is the model used for the data
                   currently in the store.

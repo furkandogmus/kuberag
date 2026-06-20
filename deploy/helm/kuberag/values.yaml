@@ -58,6 +58,15 @@ serviceAccount:
   create: true
   name: kuberag-controller-manager
 
+# Worker ServiceAccount/RBAC is installed in each namespace that hosts
+# KnowledgeBases. Add workload namespaces here.
+worker:
+  serviceAccountName: kuberag-worker
+  namespaces:
+    - default
+  rbac:
+    create: true
+
 # Pod security context.
 podSecurityContext:
   runAsNonRoot: true

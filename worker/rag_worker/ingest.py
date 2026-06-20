@@ -34,11 +34,11 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
     store = make_store(spec)
     round_num = int(os.environ.get("INGEST_ROUND", "1"))
 
-    # Create versioned physical shadow (no alias yet — data not verified).
-    shadow_name = store.create_physical(embedder.dim, distance, round_num)
+    # Create a versioned staging collection without touching the active target.
+    shadow_name = store.staging_name(round_num)
     shadow_spec = {**spec, "vectorStore": {**spec["vectorStore"], "collection": shadow_name}}
     shadow_store = make_store(shadow_spec)
-    shadow_store._ensure_payload_indexes()
+    shadow_store.recreate_collection(embedder.dim, distance)
 
     total = 0
     source_results: list[dict] = []
@@ -103,12 +103,13 @@ def _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_re
 
 
 def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
-    """Idempotent incremental ingest into the live collection."""
+    """Skip unchanged sources; rebuild atomically when any source changed."""
     store = make_store(spec)
     store.ensure_collection(embedder.dim, distance)
 
     prior = prior_sources()
     source_results: list[dict] = []
+    changed = False
 
     with tempfile.TemporaryDirectory() as tmp:
         for i, src in enumerate(spec["sources"]):
@@ -116,37 +117,32 @@ def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
 
             probe = sources.probe_revision(src)
             if probe is not None and probe == _prior_revision(prior, name):
-                log(f"source '{name}' unchanged (rev {probe}); skipping")
                 source_results.append({"name": name, "revision": probe, "chunks": _carry_chunks(prior, name)})
                 continue
 
-            log(f"fetching source '{name}' (type={src['type']})")
             dest = Path(tmp) / f"src-{i}"
             sd = sources.fetch(src, dest)
 
             if sd.revision == _prior_revision(prior, name):
-                log(f"source '{name}' content unchanged after fetch; skipping embed")
                 source_results.append({"name": name, "revision": sd.revision, "chunks": _carry_chunks(prior, name)})
                 continue
+            changed = True
+            break
 
-            # Replace this source's chunks: delete old, upsert new.
-            # NOTE: delete-before-upsert has a window where failure leaves the
-            # source empty. The Job is retried (backoffLimit=2) and upsert uses
-            # deterministic point IDs, so re-ingestion is idempotent. A future
-            # improvement would use shadow-based per-source swap or chunk_hash
-            # filtering to delete only obsolete chunks.
-            store.delete_by_source(name)
-            points = _iter_points(name, sd, strategy, max_tokens, overlap)
-            count = _embed_and_upsert(embedder, store, points)
-            source_results.append({"name": name, "revision": sd.revision, "chunks": count})
-            log(f"source '{name}': indexed {count} chunks")
+    if changed:
+        store.close()
+        log("source change detected; rebuilding through atomic staging collection")
+        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
+        return
 
     total = store.count()
-    upserted = sum(s.get("chunks", 0) for s in source_results)
-    if total < upserted:
-        total = upserted
+    if total == 0:
+        store.close()
+        log("active collection is empty; rebuilding through atomic staging collection")
+        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
+        return
     write_result({"totalChunks": total, "sources": source_results})
-    log(f"done: {total} chunks in store")
+    log(f"all sources unchanged: {total} chunks retained")
     store.close()
 
 

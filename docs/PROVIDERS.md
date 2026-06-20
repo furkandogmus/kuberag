@@ -6,7 +6,7 @@
 |------|--------|--------------------|-------|
 | `github` | `repo`, `ref`, `includeGlobs[]`, `tokenSecretRef` | commit SHA (`git ls-remote`) | Blobless + sparse clone: only matching paths are fetched. |
 | `s3` | `bucket`, `prefix`, `region`, `endpoint`, `includeGlobs[]`, key secrets | sorted object ETags hash | Works with AWS S3 and S3-compatible stores (MinIO) via path-style addressing. |
-| `web` | `urls[]`, `maxDepth`, `sameDomainOnly`, `maxPages` | crawl content hash | Bounded static-HTML crawler; normalizes URLs, deduplicates links, enforces redirect domains, and strips HTML to text. |
+| `web` | `urls[]`, `maxDepth`, `sameDomainOnly`, `maxPages`, `allowPrivateNetworks` | crawl content hash | Bounded static-HTML crawler; blocks non-public targets by default, normalizes URLs, deduplicates links, enforces redirect domains, and strips HTML to text. |
 
 `includeGlobs` are gitignore-style with real `**` semantics (`docs/**/*.md`
 matches nested *and* top-level). Empty globs fall back to known text extensions.

@@ -17,6 +17,14 @@ from rag_worker.sources import (
 
 
 class TestSources(unittest.TestCase):
+    def setUp(self):
+        resolver = patch(
+            "rag_worker.sources._resolve_web_addresses",
+            return_value={"93.184.216.34"},
+        )
+        self.mock_resolver = resolver.start()
+        self.addCleanup(resolver.stop)
+
     @patch("pypdf.PdfReader")
     def test_read_pdf(self, mock_pdf_reader):
         # Setup mock reader & pages
@@ -227,6 +235,65 @@ class TestSources(unittest.TestCase):
         })
 
         self.assertEqual(result.docs, [("https://example.com/", "Home Removed")])
+
+    @patch("requests.get")
+    def test_fetch_web_blocks_private_address(self, mock_get):
+        self.mock_resolver.return_value = {"169.254.169.254"}
+
+        with self.assertRaisesRegex(RuntimeError, "non-public address"):
+            fetch_web({
+                "name": "site",
+                "type": "web",
+                "web": {
+                    "urls": ["http://metadata.internal/"],
+                    "maxDepth": 0,
+                    "maxPages": 1,
+                },
+            })
+        mock_get.assert_not_called()
+
+    @patch("requests.get")
+    def test_fetch_web_allows_private_address_with_explicit_opt_in(self, mock_get):
+        self.mock_resolver.return_value = {"10.0.0.10"}
+        response = MagicMock(status_code=200, url="http://docs.internal/", text="<h1>Internal docs</h1>")
+        response.headers = {"content-type": "text/html"}
+        mock_get.return_value = response
+
+        result = fetch_web({
+            "name": "site",
+            "type": "web",
+            "web": {
+                "urls": ["http://docs.internal/"],
+                "maxDepth": 0,
+                "maxPages": 1,
+                "allowPrivateNetworks": True,
+            },
+        })
+
+        self.assertEqual(result.docs, [("http://docs.internal/", "Internal docs")])
+
+    @patch("requests.get")
+    def test_fetch_web_blocks_redirect_to_private_address_before_request(self, mock_get):
+        self.mock_resolver.side_effect = [
+            {"93.184.216.34"},
+            {"169.254.169.254"},
+        ]
+        redirect = MagicMock(status_code=302, url="https://example.com/start", text="")
+        redirect.headers = {"location": "http://metadata.internal/latest"}
+        mock_get.return_value = redirect
+
+        with self.assertRaisesRegex(RuntimeError, "non-public address"):
+            fetch_web({
+                "name": "site",
+                "type": "web",
+                "web": {
+                    "urls": ["https://example.com/start"],
+                    "maxDepth": 0,
+                    "maxPages": 1,
+                },
+            })
+
+        self.assertEqual(mock_get.call_count, 1)
 
 
 if __name__ == "__main__":
