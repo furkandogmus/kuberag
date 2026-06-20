@@ -132,7 +132,7 @@ jobs:
       - name: Build operator image
         run: docker build -t kuberag:latest .
       - name: Scan operator image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: kuberag:latest
           format: table
@@ -142,7 +142,7 @@ jobs:
       - name: Build worker image
         run: docker build -t kuberag-worker:latest -f worker/Dockerfile worker/
       - name: Scan worker image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: kuberag-worker:latest
           format: table
@@ -152,7 +152,7 @@ jobs:
       - name: Build retriever image
         run: docker build -t kuberag-retriever:latest -f worker/Dockerfile.retriever worker/
       - name: Scan retriever image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: kuberag-retriever:latest
           format: table
