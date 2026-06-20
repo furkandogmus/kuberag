@@ -5,8 +5,8 @@ kubernetes==31.0.0
 
 # Source backends
 boto3==1.35.76           # s3
-requests==2.32.3         # web crawl
-pypdf==5.1.0             # pdf parser
+requests==2.33.0         # web crawl
+pypdf==6.7.3             # pdf parser
 
 # Optional vector stores (kept here so the single worker image is fully capable)
 psycopg[binary]==3.2.3   # pgvector
