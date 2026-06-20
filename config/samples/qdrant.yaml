@@ -1,4 +1,6 @@
 # Minimal in-cluster Qdrant for local testing. Not for production.
+# EPHEMERAL: no PVC — all Qdrant data is lost on pod restart.
+# For persistence, use Qdrant's official Helm chart or add a PersistentVolumeClaim.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

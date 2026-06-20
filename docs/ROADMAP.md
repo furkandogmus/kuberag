@@ -5,23 +5,25 @@ welcome.
 
 ## Validated today
 
-- Sources: GitHub (sparse clone), S3/MinIO, web crawl
+- Sources: GitHub (sparse clone), S3/MinIO, web crawl (hardened: fails loud on seed errors)
 - Stores: Qdrant, pgvector, Milvus
 - Embeddings: local (fastembed) + OpenAI-compatible (OpenAI, Gemini, Ollama, …)
 - Generation: OpenAI-compatible chat (OpenAI/OpenRouter/Groq/Gemini/Ollama)
 - Incremental ingest, freshness cron, finalizer cleanup
-- Eval + closed-loop chunking auto-tune
-- In-cluster deploy, leader election, RBAC, events, Prometheus metrics
-- CI (unit + envtest integration + lint) and multi-arch (amd64/arm64) images
+- Eval + closed-loop chunking auto-tune (ladder + revert-to-best)
+- Hybrid search (RRF), per-request tuning knobs, Playground UI
+- Reranking (cross-encoder), metadata filtering (source, docPath)
+- In-cluster deploy, leader election, RBAC, events, Prometheus metrics + Grafana
+- CI (unit + envtest integration + e2e + lint) and multi-arch (amd64/arm64) images
+- NetworkPolicy, PriorityClass, Kustomize bootstrap
 
 ## Near term
 
-- **Helm chart / kustomize overlays** for install (currently raw manifests).
+- **Helm chart** for install (currently raw manifests + Kustomize base).
 - **Health probing for pgvector and Milvus** (today only Qdrant is probed).
 - **Validating/defaulting webhooks** (today: CEL validation only).
 - **Incremental at file granularity** (skip is per-source; could diff changed files).
 - **More sources**: Confluence/Notion, generic Git (non-GitHub), local PVC.
-- **Rerank + hybrid search** options surfaced on `Retriever`.
 
 ## Later
 

@@ -2,7 +2,11 @@
 import os
 import sys
 import unittest
+import warnings
 from unittest.mock import MagicMock, patch
+
+# Silence transitive asyncio deprecation on Python 3.14+.
+warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*")
 
 # Add worker directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

@@ -19,6 +19,7 @@ k3d cluster create "$CLUSTER" --wait
 echo "==> installing CRDs, RBAC, and the operator (from GHCR images)"
 kubectl apply -f "$ROOT/config/crd"
 kubectl apply -f "$ROOT/config/rbac/role.yaml"
+kubectl apply -f "$ROOT/config/rbac/priority-class.yaml"
 kubectl apply -f "$ROOT/config/manager/manager.yaml"
 kubectl apply -f "$ROOT/config/rbac/leader_election_role.yaml"
 kubectl -n kuberag-system rollout status deploy/kuberag-controller-manager --timeout=120s
