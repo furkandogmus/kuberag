@@ -238,9 +238,10 @@ func TestKnowledgeBaseReconcileLifecycle(t *testing.T) {
 			return err
 		}
 		if len(role.Rules) != 1 ||
-			len(role.Rules[0].ResourceNames) != 1 ||
-			role.Rules[0].ResourceNames[0] != resultConfigMapName(job.Name) {
-			return fmt.Errorf("worker Role is not result-scoped: %#v", role.Rules)
+			len(role.Rules[0].ResourceNames) != 2 ||
+			role.Rules[0].ResourceNames[0] != checkpointConfigMapName(job.Name) ||
+			role.Rules[0].ResourceNames[1] != resultConfigMapName(job.Name) {
+			return fmt.Errorf("worker Role is not scoped to checkpoint+result: %#v", role.Rules)
 		}
 		var binding rbacv1.RoleBinding
 		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "lifecycle-worker"}, &binding); err != nil {
@@ -1071,6 +1072,7 @@ func TestCRDPruning(t *testing.T) {
 					"type":     "qdrant",
 					"endpoint": "http://qdrant:6333",
 				},
+				// Typo field that should be silently pruned by the CRD schema:
 				"chunkingg": map[string]interface{}{
 					"maxTokens": 999,
 				},
@@ -1083,10 +1085,11 @@ func TestCRDPruning(t *testing.T) {
 		t.Fatalf("create KB with typo field: %v", err)
 	}
 
+	// Read back — envtest cache may lag behind the create, so retry.
 	var created ragv1alpha1.KnowledgeBase
-	if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: name}, &created); err != nil {
-		t.Fatalf("read back created KB: %v", err)
-	}
+	eventually(t, 10*time.Second, func() error {
+		return k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: name}, &created)
+	})
 	if created.Spec.Chunking.MaxTokens == 999 {
 		t.Error("chunkingg field was not pruned; Chunking.MaxTokens unexpectedly set to 999")
 	}
