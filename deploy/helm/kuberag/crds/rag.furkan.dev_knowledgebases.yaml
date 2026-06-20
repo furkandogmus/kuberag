@@ -1084,6 +1084,14 @@ spec:
                             x-kubernetes-list-type: atomic
                         type: object
                     type: object
+                  batchSize:
+                    default: 64
+                    description: |-
+                      BatchSize controls the number of chunks embedded and upserted per
+                      batched operation. Smaller values use less memory but more round-trips.
+                      Default 64 is a balance for ONNX-based embedders.
+                    minimum: 1
+                    type: integer
                   mode:
                     default: incremental
                     description: |-

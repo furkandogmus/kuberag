@@ -1,0 +1,15 @@
+# PodDisruptionBudget for the operator Deployment to prevent the
+# leader from being drained mid-reconcile (which would leave an
+# in-flight ActiveJob orphaned until the stale-Job detection timer
+# fires). MinAvailable=1 ensures at least one replica survives a
+# voluntary disruption.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kuberag-operator
+  namespace: kuberag-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuberag

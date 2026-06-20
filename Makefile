@@ -51,6 +51,11 @@ test-py: ## Run Python worker tests.
 api-docs: manifests ## Regenerate docs/API.md from the rendered CRD YAML.
 	$(PYTHON) hack/gen-api-docs.py
 
+.PHONY: lint-helm
+lint-helm: ## Lint the Helm chart.
+	@which helm >/dev/null || (echo "helm not found; install from https://helm.sh"; exit 1)
+	helm lint deploy/helm/kuberag/
+
 .PHONY: demo
 demo: ## Create a k3d cluster and run a full end-to-end demo.
 	./hack/demo.sh

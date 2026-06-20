@@ -19,17 +19,19 @@ def run() -> None:
     strategy = chunking.get("strategy", "semantic")
     max_tokens = chunking.get("maxTokens", 800)
     overlap = chunking.get("overlap", 80)
+    ingestion_cfg = spec.get("ingestion", {})
+    batch_size = int(ingestion_cfg.get("batchSize", 0) or 64)
 
     embedder = from_spec(spec["embedding"])
     distance = spec["vectorStore"].get("distance", "cosine")
 
     if mode == "full":
-        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
+        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
     else:
-        _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
+        _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
 
 
-def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
+def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size):
     """Atomic full ingest: versioned shadow → verify → promote via alias."""
     store = make_store(spec)
     round_num = int(os.environ.get("INGEST_ROUND", "1"))
@@ -50,7 +52,7 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
                 dest = Path(tmp) / f"src-{i}"
                 sd = sources.fetch(src, dest)
                 points = _iter_points(name, sd, strategy, max_tokens, overlap)
-                count = _embed_and_upsert(embedder, shadow_store, points)
+                count = _embed_and_upsert(embedder, shadow_store, points, batch_size)
                 source_results.append({"name": name, "revision": sd.revision, "chunks": count})
                 log(f"source '{name}': indexed {count} chunks into {shadow_name}")
                 total += count
@@ -68,7 +70,7 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
         if not swapped:
             log("WARNING: store does not support atomic swap; recreating inline")
             store.recreate_collection(embedder.dim, distance)
-            _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results)
+            _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results, batch_size)
         else:
             log(f"atomic swap: alias → {shadow_name} promoted")
 
@@ -91,7 +93,7 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
         raise
 
 
-def _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results):
+def _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results, batch_size):
     """Re-ingest into a fresh collection (expensive fallback for non-atomic stores)."""
     import shutil
     for i, src in enumerate(spec["sources"]):
@@ -100,13 +102,13 @@ def _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_re
         try:
             sd = sources.fetch(src, dest)
             points = _iter_points(name, sd, strategy, max_tokens, overlap)
-            count = _embed_and_upsert(embedder, store, points)
+            count = _embed_and_upsert(embedder, store, points, batch_size)
             source_results[i] = {"name": name, "revision": sd.revision, "chunks": count}
         finally:
             shutil.rmtree(dest.parent, ignore_errors=True)
 
 
-def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
+def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size):
     """Skip unchanged sources; rebuild atomically when any source changed."""
     store = make_store(spec)
     store.ensure_collection(embedder.dim, distance)
@@ -136,14 +138,14 @@ def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
     if changed:
         store.close()
         log("source change detected; rebuilding through atomic staging collection")
-        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
+        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
         return
 
     total = store.count()
     if total == 0:
         store.close()
         log("active collection is empty; rebuilding through atomic staging collection")
-        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap)
+        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
         return
     write_result({"totalChunks": total, "sources": source_results})
     log(f"all sources unchanged: {total} chunks retained")

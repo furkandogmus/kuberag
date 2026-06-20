@@ -248,6 +248,13 @@ type IngestionSpec struct {
 	// +kubebuilder:default=incremental
 	// +optional
 	Mode IngestMode `json:"mode,omitempty"`
+	// BatchSize controls the number of chunks embedded and upserted per
+	// batched operation. Smaller values use less memory but more round-trips.
+	// Default 64 is a balance for ONNX-based embedders.
+	// +kubebuilder:default=64
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	BatchSize int `json:"batchSize,omitempty"`
 	// Resources for the ingestion worker pod.
 	// +optional
 	Resources *ResourceRequirements `json:"resources,omitempty"`

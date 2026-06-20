@@ -62,8 +62,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: govulncheck
+        continue-on-error: true
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: build
         run: go build ./...
+
+      - name: helm lint
+        run: make lint-helm
 
       - name: generated artifacts up to date
         run: |
