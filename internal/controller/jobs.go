@@ -133,6 +133,7 @@ func resourceRequirements(rr *ragv1alpha1.ResourceRequirements) (corev1.Resource
 	// memory-hungry; 2Gi OOM-kills on non-trivial corpora).
 	out.Requests[corev1.ResourceCPU] = resource.MustParse("250m")
 	out.Requests[corev1.ResourceMemory] = resource.MustParse("1Gi")
+	out.Limits[corev1.ResourceCPU] = resource.MustParse("2")
 	out.Limits[corev1.ResourceMemory] = resource.MustParse("4Gi")
 	if rr != nil {
 		if rr.CPU != "" {
@@ -196,9 +197,11 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash string, arg
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: sa,
-					SecurityContext:    hardenedPodSecurityContext(),
+					RestartPolicy:                 corev1.RestartPolicyNever,
+					ServiceAccountName:            sa,
+					PriorityClassName:             "kuberag-system",
+					TerminationGracePeriodSeconds: ptr.To(int64(120)),
+					SecurityContext:               hardenedPodSecurityContext(),
 					Volumes:            []corev1.Volume{scratchVolume()},
 					NodeSelector:       kb.Spec.Ingestion.NodeSelector,
 					Tolerations:        kb.Spec.Ingestion.Tolerations,

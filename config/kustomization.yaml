@@ -1,0 +1,19 @@
+# Kustomize base for kuberag. Apply with:
+#   kubectl apply -k config/
+#
+# Overlay with production images / namespace / replicas in overlays/.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kuberag-system
+
+resources:
+  - crd/
+  - rbac/role.yaml
+  - rbac/leader_election_role.yaml
+  - rbac/priority-class.yaml
+  - manager/manager.yaml
+
+images:
+  - name: ghcr.io/furkandogmus/kuberag
+    newTag: latest

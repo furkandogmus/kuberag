@@ -13,5 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY rag_worker/ ./rag_worker/
 
-# The operator passes the subcommand (ingest|eval|cleanup) as the first arg.
+# Run as non-root, consistent with the pod security context.
+USER 65532:65532
+
 ENTRYPOINT ["python", "-m", "rag_worker"]

@@ -16,4 +16,5 @@ COPY rag_worker/ ./rag_worker/
 COPY retriever/ ./retriever/
 
 EXPOSE 8000
+USER 65532:65532
 ENTRYPOINT ["uvicorn", "retriever.server:app", "--host", "0.0.0.0", "--port", "8000"]

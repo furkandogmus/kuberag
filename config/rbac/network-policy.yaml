@@ -1,0 +1,110 @@
+# NetworkPolicy: default-deny ingress to operator + retriever, allow essential egress.
+# Apply in kuberag-system and every namespace with KnowledgeBases.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kuberag-manager
+  namespace: kuberag-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kuberag
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: metrics
+          protocol: TCP
+        - port: probes
+          protocol: TCP
+  egress:
+    # Talk to the Kubernetes API.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-apiserver
+      ports:
+        - port: 443
+          protocol: TCP
+    # Watch/manage resources in workload namespaces.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 10250
+          protocol: TCP
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kuberag-worker
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: kuberag
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []  # deny all ingress to worker pods
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+    # Kubernetes API (publish result ConfigMap, read eval dataset).
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-apiserver
+      ports:
+        - port: 443
+          protocol: TCP
+    # Vector stores (Qdrant, pgvector, Milvus).
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 6333
+          protocol: TCP
+        - port: 6334
+          protocol: TCP
+        - port: 5432
+          protocol: TCP
+        - port: 19530
+          protocol: TCP
+    # External APIs (embedding, generation, model downloads).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP

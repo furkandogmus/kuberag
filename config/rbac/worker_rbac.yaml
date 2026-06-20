@@ -1,19 +1,18 @@
 # ServiceAccount + RBAC for ingestion/eval/cleanup Jobs.
 #
-# Jobs run in the SAME namespace as the KnowledgeBase. Apply this in every
-# namespace where you create KnowledgeBases (shown here for "default").
+# Apply in every namespace where you create KnowledgeBases:
+#   kubectl apply -f config/rbac/worker_rbac.yaml -n <namespace>
+#
 # The worker only needs to publish its result ConfigMap and read the eval dataset.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: kuberag-worker
-  namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kuberag-worker
-  namespace: default
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -23,7 +22,6 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: kuberag-worker
-  namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -31,4 +29,3 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: kuberag-worker
-    namespace: default

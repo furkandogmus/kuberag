@@ -70,7 +70,7 @@ deploy: manifests ## Deploy operator (CRD + RBAC + manager) into the cluster.
 	kubectl apply -f config/manager/manager.yaml          # creates the namespace
 	kubectl apply -f config/rbac/leader_election_role.yaml # needs the namespace
 worker-rbac: ## Install the worker ServiceAccount + RBAC (edit namespace as needed).
-	kubectl apply -f config/rbac/worker_rbac.yaml
+	kubectl apply -f config/rbac/worker_rbac.yaml -n default
 undeploy:
 	kubectl delete -f config/manager/manager.yaml || true
 	kubectl delete -f config/rbac/leader_election_role.yaml || true

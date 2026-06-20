@@ -4,6 +4,10 @@ kind: Service
 metadata:
   name: kuberag-metrics
   namespace: kuberag-system
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
   labels:
     app.kubernetes.io/name: kuberag
 spec:

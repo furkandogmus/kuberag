@@ -1,0 +1,17 @@
+# PodDisruptionBudget for Retriever deployments to prevent unavailability
+# during voluntary disruptions (node drains, cluster upgrades).
+# Apply in every namespace with Retriever resources.
+#
+# NOTE: This is a template — replace <name> with the Retriever name and adjust
+# namespace. For automated management, the Retriever controller may own a PDB
+# in a future release.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: <name>-retriever
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      rag.furkan.dev/retriever: <name>

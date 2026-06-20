@@ -40,12 +40,15 @@ spec:
         app.kubernetes.io/name: kuberag
     spec:
       serviceAccountName: kuberag-controller-manager
+      priorityClassName: kuberag-system
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
       containers:
         - name: manager
           image: ghcr.io/furkandogmus/kuberag:latest
@@ -61,17 +64,25 @@ spec:
           ports:
             - containerPort: 8080
               name: metrics
+            - containerPort: 8081
+              name: probes
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8081
+              port: probes
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8081
+              port: probes
             initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            failureThreshold: 12
             periodSeconds: 10
           resources:
             requests:

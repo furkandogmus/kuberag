@@ -24,7 +24,7 @@ kubectl apply -f "$ROOT/config/rbac/leader_election_role.yaml"
 kubectl -n kuberag-system rollout status deploy/kuberag-controller-manager --timeout=120s
 
 echo "==> deploying Qdrant + worker RBAC + a small KnowledgeBase + Retriever"
-kubectl apply -f "$ROOT/config/rbac/worker_rbac.yaml"
+kubectl apply -f "$ROOT/config/rbac/worker_rbac.yaml" -n default
 kubectl apply -f "$ROOT/config/samples/qdrant.yaml"
 kubectl apply -f "$ROOT/config/samples/e2e-test.yaml"
 

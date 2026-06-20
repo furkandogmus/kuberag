@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -190,6 +191,16 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 	var resources corev1.ResourceRequirements
 	if rt.Spec.Resources != nil {
 		resources = *rt.Spec.Resources
+	} else {
+		resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("2Gi"),
+			},
+		}
 	}
 
 	return &appsv1.Deployment{
@@ -210,11 +221,21 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 				},
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: ptr.To(false),
+					PriorityClassName:            "kuberag-system",
+					TerminationGracePeriodSeconds: ptr.To(int64(60)),
 					SecurityContext:              hardenedPodSecurityContext(),
 					Volumes:                      []corev1.Volume{scratchVolume()},
 					NodeSelector:                 rt.Spec.NodeSelector,
 					Tolerations:                  rt.Spec.Tolerations,
 					Affinity:                     rt.Spec.Affinity,
+					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+						{
+							MaxSkew:           1,
+							TopologyKey:       "topology.kubernetes.io/zone",
+							WhenUnsatisfiable: corev1.ScheduleAnyway,
+							LabelSelector:      &metav1.LabelSelector{MatchLabels: labels},
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            "retriever",
@@ -234,6 +255,26 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 								},
 								InitialDelaySeconds: 10,
 								PeriodSeconds:       10,
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromInt32(8000),
+									},
+								},
+								InitialDelaySeconds: 60,
+								PeriodSeconds:       30,
+							},
+							StartupProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromInt32(8000),
+									},
+								},
+								FailureThreshold: 18,
+								PeriodSeconds:    10,
 							},
 						},
 					},
