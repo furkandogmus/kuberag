@@ -27,6 +27,7 @@ class TestMilvusIntegration(unittest.TestCase):
             raise unittest.SkipTest("MILVUS_ENDPOINT not set; skipping Milvus nightly test")
         from rag_worker.stores import MilvusStore
 
+        cls.endpoint = endpoint
         cls.store = MilvusStore(endpoint, TEST_COLLECTION, "cosine")
         cls.store.recreate_collection(384, "cosine")
 
@@ -37,9 +38,9 @@ class TestMilvusIntegration(unittest.TestCase):
 
     def test_upsert_and_search(self):
         points = [
-            {"id": "m1", "vector": [1.0] + [0.0] * 383,
+            {"id": "1", "vector": [1.0] + [0.0] * 383,
              "payload": {"source": "docs", "doc_path": "a.md", "text": "hello world"}},
-            {"id": "m2", "vector": [0.0] * 383 + [1.0],
+            {"id": "2", "vector": [0.0] * 383 + [1.0],
              "payload": {"source": "docs", "doc_path": "b.md", "text": "milvus test"}},
         ]
         self.store.upsert(points)
@@ -60,7 +61,7 @@ class TestMilvusIntegration(unittest.TestCase):
 
     def test_delete_by_source_and_recount(self):
         self.store.upsert([
-            {"id": "mdel", "vector": [0.5] * 384,
+            {"id": "del1", "vector": [0.5] * 384,
              "payload": {"source": "tmp", "doc_path": "x.md", "text": "to delete"}},
         ])
         import time
@@ -72,16 +73,17 @@ class TestMilvusIntegration(unittest.TestCase):
         self.assertLess(after, before)
 
     def test_staging_swap(self):
-        stage = self.store.__class__(self.store.client._uri, self.store.staging_name(77), "cosine")
+        stage_name = self.store.staging_name(77)
+        stage = self.store.__class__(self.endpoint, stage_name, "cosine")
         try:
             stage.ensure_collection(384, "cosine")
             stage.upsert([
-                {"id": "ms1", "vector": [1.0] * 384,
+                {"id": "s77", "vector": [1.0] * 384,
                  "payload": {"source": "s", "doc_path": "s.md", "text": "staged nightly"}},
             ])
             import time
             time.sleep(1)
-            ok = self.store.swap_collection(stage.collection)
+            ok = self.store.swap_collection(stage_name)
             self.assertTrue(ok)
             hits = self.store.search([1.0] * 384, topk=1)
             self.assertGreaterEqual(len(hits), 1)

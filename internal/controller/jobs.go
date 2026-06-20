@@ -22,12 +22,12 @@ const (
 	defaultRetrieverImage = "ghcr.io/furkandogmus/kuberag-retriever:latest"
 	defaultWorkerSA       = "kuberag-worker"
 
-	labelManagedBy    = "app.kubernetes.io/managed-by"
-	labelKB           = "rag.furkan.dev/knowledgebase"
-	labelJobType      = "rag.furkan.dev/job-type"
-	labelSpecHash     = "rag.furkan.dev/spec-hash"
-	labelSecretsHash  = "rag.furkan.dev/secrets-hash"
-	labelChunking     = "rag.furkan.dev/chunking" // strategy|maxTokens|overlap for jobEffectiveChunking
+	labelManagedBy   = "app.kubernetes.io/managed-by"
+	labelKB          = "rag.furkan.dev/knowledgebase"
+	labelJobType     = "rag.furkan.dev/job-type"
+	labelSpecHash    = "rag.furkan.dev/spec-hash"
+	labelSecretsHash = "rag.furkan.dev/secrets-hash"
+	labelChunking    = "rag.furkan.dev/chunking" // strategy|maxTokens|overlap for jobEffectiveChunking
 
 	jobTypeIngest  = "ingest"
 	jobTypeEval    = "eval"
