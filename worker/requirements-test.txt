@@ -5,3 +5,4 @@ python-multipart==0.0.31     # /ingest/file Form route (app import)
 pypdf==6.7.3             # PDF extraction tests (sources + ingest)
 requests==2.33.0         # web-crawl / URL-ingest tests
 pytest==8.3.4            # nightly integration tests
+pyyaml>=6.0.3            # hack/gen-api-docs.py reads CRD manifests

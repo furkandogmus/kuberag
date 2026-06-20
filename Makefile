@@ -42,6 +42,10 @@ test-py-deps: ## Install Python test dependencies into a local venv.
 test-py: ## Run Python worker tests.
 	$(PYTEST_PYTHON) -m unittest discover -s worker/tests
 
+.PHONY: api-docs
+api-docs: manifests ## Regenerate docs/API.md from the rendered CRD YAML.
+	$(PYTHON) hack/gen-api-docs.py
+
 .PHONY: demo
 demo: ## Create a k3d cluster and run a full end-to-end demo.
 	./hack/demo.sh

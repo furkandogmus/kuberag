@@ -50,7 +50,10 @@ loop; finalizer cleanup; in-cluster deployment; blobless+sparse clone.
 - [API reference](docs/API.md) — every CRD field (`KnowledgeBase`, `Retriever`, `VectorIndex`).
 - [Providers & backends](docs/PROVIDERS.md) — sources, stores, embeddings, generation (+ fully-local Ollama).
 - [Observability](docs/OBSERVABILITY.md) — status/conditions, events, Prometheus metrics, Grafana dashboard.
-- [Roadmap](docs/ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+- [Runbook](docs/RUNBOOK.md) — on-call handbook: phase meanings, re-trigger, rollback, scaling, drain/restart.
+- [Reference architecture](docs/ARCHITECTURE-reference.md) — production deployment: HA, IRSA, ingress, auth, backups.
+- [Versioning & deprecation policy](docs/VERSIONING.md) — SemVer + Kubernetes API conventions.
+- [Roadmap & production readiness](docs/ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](docs/CHANGELOG.md)
 
 ## Custom Resources
 

@@ -56,6 +56,12 @@ jobs:
             output:crd:artifacts:config=config/crd output:rbac:artifacts:config=config/rbac
           git diff --exit-code || (echo "::error::CRD/RBAC/deepcopy out of date — run 'make manifests generate'"; exit 1)
 
+      - name: API reference up to date
+        run: |
+          python3 -m pip install --quiet -r worker/requirements-test.txt
+          make api-docs
+          git diff --exit-code || (echo "::error::docs/API.md out of date — run 'make api-docs'"; exit 1)
+
       - name: unit tests
         run: go test -count=1 ./...
 
