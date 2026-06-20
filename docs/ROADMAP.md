@@ -367,9 +367,10 @@ Items that the existing test pyramid (unit / envtest integration /
 Python mock / k3d e2e) does not cover. These are not about new
 features; they are about confidence in what's already built.
 
-- **Helm chart test** — no `helm lint` or `helm unittest` in CI.
-  A chart template regression (e.g. a broken `_helpers.tpl`) is
-  invisible until someone tries to deploy.
+- **Helm chart test** — `helm lint` is in CI (`make lint-helm`);
+  `helm unittest` (template rendering + assertion tests) is not
+  yet added. Template regressions in `_helpers.tpl` or omitted
+  RBAC rules are not caught unless someone tries to deploy.
 - **Upgrade test** — a KB created with v0.3 must survive a
   v0.3 → v0.4 upgrade (CRD schema migration, stored-version
   change, controller rolling update mid-reconcile). Today no
@@ -449,10 +450,13 @@ features; they are about confidence in what's already built.
   crawl URL list can exceed the 1 MiB ConfigMap size limit.
   A size guard and/or split-to-secret fallback are needed.
   Uncovered by any test today.
-- **Quick wins (sub-1-hour each)** — `make lint-helm` Makefile
-  target; `helm lint` in CI; `govulncheck` CI step; operator
-  PDB template; `BatchSize` configurable in the CRD (today
-  hardcoded to 64 in `ingest.py`).
+#### Quick wins (this iteration, sub-1-hour each)
+- **`govulncheck` CI step** — Go vulnerability scanning (advisory).
+- **`helm lint` in CI** — + `make lint-helm` Makefile target.
+- **Operator PDB template** — `config/rbac/operator-pdb.yaml`,
+  `minAvailable=1` against voluntary disruptions.
+- **`BatchSize` configurable** — `spec.ingestion.batchSize` CRD
+  field (default 64). Worker reads it from the spec JSON.
 
 ### What's already done (from this work)
 
