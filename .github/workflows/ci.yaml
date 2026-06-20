@@ -88,7 +88,7 @@ jobs:
         run: python -m pip install -r requirements.txt -r requirements-test.txt
       - name: worker tests
         working-directory: worker
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest tests.test_chunking tests.test_globs tests.test_ingest tests.test_server tests.test_sources tests.test_stores -v
         env:
           PYTHONWARNINGS: ignore::DeprecationWarning
       - name: Wait for Qdrant
