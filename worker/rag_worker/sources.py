@@ -223,7 +223,7 @@ def fetch_s3(src: dict, dest: Path) -> SourceDocs:
         else:
             text = body.decode("utf-8", errors="ignore")
         docs.append((f"s3://{s3['bucket']}/{key}", text))
-    return SourceDocs(revision=_hash(*[f"{k}:{e}:{s}" for k, e, s in objs]), docs=docs)
+    return SourceDocs(revision=_hash(*[f"{k}:{e}" for k, e, _ in objs]), docs=docs)
 
 
 # --------------------------------------------------------------------------- #

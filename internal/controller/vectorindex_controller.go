@@ -80,6 +80,17 @@ type probeResult struct {
 }
 
 func (r *VectorIndexReconciler) probe(ctx context.Context, vi *ragv1alpha1.VectorIndex) probeResult {
+	res := r.probeStore(ctx, vi)
+	// A configured collection with zero points is Degraded (either never
+	// ingested or wiped by a failed ingestion), not Healthy.
+	if res.health == ragv1alpha1.IndexHealthy && res.points == 0 && vi.Spec.Dimension > 0 {
+		res.health = ragv1alpha1.IndexDegraded
+		res.message = "collection exists with 0 points (ingestion may have failed or not yet run)"
+	}
+	return res
+}
+
+func (r *VectorIndexReconciler) probeStore(ctx context.Context, vi *ragv1alpha1.VectorIndex) probeResult {
 	switch vi.Spec.Store.Type {
 	case ragv1alpha1.VectorStoreQdrant:
 		return r.probeQdrant(ctx, vi)

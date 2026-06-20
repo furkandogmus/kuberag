@@ -229,7 +229,6 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	}
 	r.deleteResult(ctx, kb.Namespace, job.Name)
 	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
-	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
 }

@@ -49,6 +49,18 @@ class VectorStore(ABC):
     @abstractmethod
     def drop(self) -> None: ...
 
+    def swap_collection(self, shadow_name: str) -> bool:
+        """Atomically promote a shadow collection to the active name.
+
+        The current collection is replaced by the shadow. Returns True if the
+        store supports atomic swaps (Qdrant aliases, pgvector table rename,
+        Milvus aliases). If False, the caller must fall back to a non-atomic
+        recreate.
+
+        The shadow collection must already exist with the correct dimension.
+        """
+        return False  # default: not supported
+
     def close(self) -> None:
         pass
 
@@ -225,6 +237,22 @@ class QdrantStore(VectorStore):
         if self._exists():
             self.client.delete_collection(self.collection)
 
+    def swap_collection(self, shadow_name: str) -> bool:
+        """Qdrant: atomically move alias from old to shadow collection."""
+        from qdrant_client import models
+
+        self.client.update_collection_aliases(
+            change_aliases_operations=[
+                models.CreateAliasOperation(
+                    create_alias=models.CreateAlias(
+                        collection_name=shadow_name,
+                        alias_name=self.collection,
+                    )
+                )
+            ]
+        )
+        return True
+
     def close(self) -> None:
         if hasattr(self, "client") and self.client:
             try:
@@ -360,6 +388,21 @@ class PgVectorStore(VectorStore):
     def drop(self) -> None:
         self.conn.execute(f"DROP TABLE IF EXISTS {self.table}")
 
+    def swap_collection(self, shadow_name: str) -> bool:
+        """pgvector: transactional table rename for atomic promotion."""
+        import psycopg
+
+        old_table = self.table
+        shadow_table = _sanitize(shadow_name)
+        try:
+            with self.conn.transaction():
+                self.conn.execute(f"ALTER TABLE IF EXISTS {old_table} RENAME TO {old_table}_old")
+                self.conn.execute(f"ALTER TABLE {shadow_table} RENAME TO {old_table}")
+                self.conn.execute(f"DROP TABLE IF EXISTS {old_table}_old")
+        except psycopg.Error:
+            return False
+        return True
+
     def close(self) -> None:
         if hasattr(self, "conn") and self.conn:
             self.conn.close()
@@ -482,6 +525,17 @@ class MilvusStore(VectorStore):
     def drop(self) -> None:
         if self.client.has_collection(self.collection):
             self.client.drop_collection(self.collection)
+
+    def swap_collection(self, shadow_name: str) -> bool:
+        """Milvus: promote shadow via alter_alias."""
+        try:
+            self.client.alter_alias(
+                collection_name=shadow_name,
+                alias=self.collection,
+            )
+            return True
+        except Exception:
+            return False
 
     def close(self) -> None:
         if hasattr(self, "client") and self.client:
