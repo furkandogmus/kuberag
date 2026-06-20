@@ -78,3 +78,62 @@ jobs:
       - name: worker tests
         working-directory: worker
         run: python -m unittest discover -s tests -v
+
+  e2e:
+    name: e2e (k3d)
+    runs-on: ubuntu-latest
+    needs: [lint, go, python]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Create k3d cluster
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d cluster create e2e --wait
+          mkdir -p ~/.kube && k3d kubeconfig merge e2e -o ~/.kube/config
+
+      - name: Install CRDs and RBAC
+        run: |
+          kubectl apply -f config/crd
+          kubectl apply -f config/rbac/role.yaml
+          kubectl create namespace kuberag-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f config/rbac/leader_election_role.yaml
+          kubectl apply -f config/rbac/worker_rbac.yaml
+
+      - name: Start operator
+        run: |
+          go run ./cmd &
+          sleep 5
+
+      - name: Deploy Qdrant and e2e-test resources
+        run: |
+          kubectl apply -f config/samples/qdrant.yaml
+          kubectl apply -f config/samples/e2e-test.yaml
+
+      - name: Wait for ingestion to complete
+        timeout-minutes: 10
+        run: |
+          kubectl wait --for=jsonpath='{.status.phase}'=Ready kb/e2e-docs --timeout=300s
+          kubectl get kb,vi,rtr
+
+      - name: Query retriever and assert chunks indexed
+        run: |
+          kubectl rollout status deploy/e2e-docs-retriever --timeout=120s
+          kubectl port-forward svc/e2e-docs-retriever 8000:8000 &
+          sleep 4
+          RESP=$(curl -s http://localhost:8000/query -H 'content-type: application/json' \
+            -d '{"query":"machine learning resources","topK":3}')
+          echo "$RESP" | jq .
+          CHUNKS=$(kubectl get kb e2e-docs -o jsonpath='{.status.indexedChunks}')
+          echo "indexedChunks=$CHUNKS"
+          if [ "$CHUNKS" -gt 0 ]; then
+            echo "PASS: indexed $CHUNKS chunks"
+          else
+            echo "FAIL: no chunks indexed"
+            exit 1
+          fi

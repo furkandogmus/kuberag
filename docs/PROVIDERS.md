@@ -43,6 +43,62 @@ presets that fill `baseURL`. Unknown model dimensions are auto-detected from a
 probe embedding at ingest time. The query is always embedded with the same
 provider used for ingestion.
 
+## Retrieval tuning
+
+Surfaced on `Retriever.spec` and overridable per `/query` request.
+
+### Hybrid search (RRF)
+
+When enabled, the retriever runs both dense vector and lexical text search, then
+fuses results with Reciprocal Rank Fusion. The dense/lexical weight is
+configurable:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `hybrid` | `false` | Enable hybrid (vector + lexical) retrieval by default. |
+| `hybridDensePercent` | `50` | Dense (vector) weight in RRF (0 = pure lexical, 100 = pure dense). |
+
+Per-request: set `hybrid` and `hybridDensePercent` on `/query` to override.
+
+### Reranking
+
+Optional cross-encoder reranking (fastembed in-process) re-scores candidates
+before returning the top K:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `rerank.enabled` | `false` | Enable cross-encoder reranking. |
+| `rerank.model` | `bge-reranker-base` | Reranker model name. |
+| `rerank.candidatePoolSize` | `0` (auto: max(4×topK, 20)) | How many candidates to retrieve before reranking. |
+
+A larger candidate pool gives the reranker more to work with at the cost of
+latency. Per-request: set `rerank: false` to opt out of reranking on a
+rerank-enabled Retriever.
+
+### Per-request tuning knobs
+
+Every retrieval and generation parameter can be overridden per `/query` call:
+
+| Field | Description |
+|-------|-------------|
+| `topK` | Number of chunks returned (1-100). |
+| `hybrid` / `hybridDensePercent` | Override hybrid search config. |
+| `source` / `docPath` / `docPathPrefix` | Metadata filters. |
+| `scoreThresholdPercent` | Drop results below this similarity (0-100). |
+| `rerank` | Opt out of reranking (`false`). |
+| `temperature` / `maxTokens` / `systemPrompt` | Override generation config. |
+| `history` | Multi-turn conversation (list of `{role, content}`). |
+
+The response includes a `meta` object with diagnostics: `topK`, `hybrid`,
+`hybridDensePercent`, `scoreThresholdPercent`, `reranked`, `candidates`,
+`returned`, `tookMillis`.
+
+### Playground UI
+
+The retriever serves an interactive HTML playground at `/` that lets you
+experiment with every knob live, ingest files/URLs for ad-hoc testing, and see
+per-query diagnostics — no redeploy needed.
+
 ## Generation (full RAG)
 
 Optional, set on `Retriever.spec.generation`. After retrieval the server asks an

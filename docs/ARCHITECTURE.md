@@ -103,13 +103,62 @@ runs an `eval` Job over a user-supplied dataset (a ConfigMap of
 - recall ≥ target → `RecallMet`, stays `Ready`.
 - recall < target and `autoTune.enabled` and attempts remain → **AutoTuning**:
   the operator adjusts effective chunking (grow overlap, then shrink chunk size),
-  stores it in `status.effectiveChunking`, clears `observedSpecHash` to force a
-  re-index, clears the last evaluation so it re-evaluates, and bumps the attempt
-  counter.
-- attempts exhausted → `Degraded`.
+  stores it in `status.effectiveChunking`, sets `PendingRetune` to force a
+  re-index (without disturbing `observedSpecHash`), clears the last evaluation so
+  it re-evaluates, and bumps the attempt counter.
+- attempts exhausted → **Revert to best**: the operator lands the KB on the
+  chunking configuration that achieved the highest recall across all attempts
+  (`settleOnBest`), forces one final re-index + re-eval, and if still below
+  target goes `Degraded`. This prevents settling on the last (arbitrary) ladder
+  step when a prior configuration performed better.
+- **Empty dataset guard**: evaluations with `queries=0` (missing/empty dataset)
+  are recorded with a `NoDataset` condition but skip the recall gate and
+  auto-tune — a meaningless 0% recall won't churn the loop.
 
-Eval Jobs are named with an incrementing `status.evalRound` so repeated
-evaluations never collide with a finished Job still inside its TTL.
+### Auto-tune ladder
+
+`nextChunking` drives a structured exploration:
+
+1. **Grow overlap** (+40 tokens per step) to reduce answer cuts across chunk
+   boundaries.
+2. Once overlap dominates the chunk, **shrink chunk size** (-200 tokens, floor
+   300) and reset overlap to 20% — finer-grained, more precise chunks.
+3. At the floor with max overlap, **rotate the split strategy** (semantic →
+   recursive → fixed → semantic) and reset size/overlap — attack the corpus with
+   a different boundary model rather than shrinking further.
+
+`recordBest` snapshots the effective chunking + recall on every evaluation,
+keeping the best by recall (ties keep the earlier, cheaper, larger-chunk config).
+This memory lets `settleOnBest` revert to the optimal configuration on exhaustion.
+
+Eval Jobs are named with an incrementing `status.evalRound`; ingest Jobs include
+`ingestRound`, `autoTuneAttempts`, and a `chunkFingerprint` to guarantee unique
+names across retries, auto-tune steps, and settle/revert re-indices — even before
+the TTL expires.
+
+## Job naming & collision avoidance
+
+Ingest Job names carry three disambiguators so every run, retry, or auto-tune
+step gets a unique name — even before `ttlSecondsAfterFinished` (300s) expires:
+
+- **`ingestRound`** — increments on every ingestion attempt (initial, retry,
+  freshness re-sync), ensuring no two sequential runs collide.
+- **`autoTuneAttempts`** — identifies which tune iteration this ingest belongs to.
+- **`chunkFingerprint`** — a hash of `(strategy, maxTokens, overlap)`, keeping a
+  settle/revert re-index (same attempt counter, different chunking) distinct from
+  the prior attempt.
+
+On completion the operator immediately deletes the finished Job (rather than
+relying on TTL), so the next run always gets a clean slate.
+
+## Web crawl hardening
+
+The web crawler treats seed URLs as authoritative and fails **loud** on any seed
+error — connection failure, non-200 HTTP status, non-HTML response, cross-domain
+redirect, no indexable text — producing a clear error rather than silently
+producing an empty knowledge base. Discovered pages are more lenient (404s and
+benign redirects are silently skipped), but retryable errors (429, 5xx) on any
+page still cause the crawl to fail so the operator can retry.
 
 ## Hashing
 
@@ -141,6 +190,26 @@ injected as needed). It mirrors the Deployment's readiness into
 the store, optionally reranks, and — if generation is configured — asks an
 OpenAI-compatible chat model to synthesize an answer grounded in the retrieved
 chunks, returning `{answer, results}`.
+
+### Retrieval features
+
+- **Hybrid search (RRF).** When enabled (per-Retriever default or per-request
+  override), the server runs both dense vector search and lexical text search,
+  then fuses results with Reciprocal Rank Fusion. The dense/lexical weight is
+  configurable via `hybridDensePercent` (0 = pure lexical, 100 = pure dense,
+  default 50).
+- **Reranking.** An optional cross-encoder reranker re-scores retrieved candidates
+  before returning the top K, with a configurable candidate pool size.
+- **Per-request overrides.** Every tuning knob — `topK`, `hybrid`,
+  `hybridDensePercent`, `scoreThresholdPercent`, `rerank`, `temperature`,
+  `maxTokens`, `systemPrompt` — can be set per `/query` request without
+  redeploying. This powers the built-in [Playground UI](#playground).
+- **Metadata filtering.** Queries can filter by `source`, exact `docPath`, or
+  `docPathPrefix`.
+- **Playground UI.** A built-in HTML playground (`/`) lets you experiment with
+  every retrieval and generation knob interactively, file/URL ingest for ad-hoc
+  testing, and view per-query diagnostics (`meta` with candidate count, latency,
+  threshold).
 
 ## VectorIndex
 
