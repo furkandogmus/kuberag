@@ -80,7 +80,7 @@ Required top-level: `embedding, sources, vectorStore`
 - **`retrievalQuality.evalSchedule`** `string` (optional) — EvalSchedule is a cron expression for running evaluations (5-field crontab). · `pattern=^((\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)\s+){4}(\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)$`
 - **`retrievalQuality.minimumRecallPercent`** `integer` (optional) — MinimumRecallPercent is the recall@TopK target (0-100). Below this the KB is marked degraded and, if AutoTune is enabled, the operator adjusts chunking. · `minimum=0`, `maximum=100`
 - **`retrievalQuality.topK`** `integer` (optional) — TopK used during evaluation retrieval.
-- **`sources`** `array(object)` · `minItems=1`, `maxItems=5`
+- **`sources`** `array(object)` — Sources is the list of input sources to index. Limited to 5 per KnowledgeBase; if you need more, split into multiple KnowledgeBases (each gets its own IngestionRun history and failure isolation). · `minItems=1`, `maxItems=5`
 - **`suspend`** `boolean` (optional) — Suspend pauses all reconciliation actions (no new Jobs) when true.
 - **`vectorStore`** `object` — VectorStoreSpec describes where embeddings are written.
 - **`vectorStore.collection`** `string` (optional) — Collection (or table) name. Defaults to the KnowledgeBase name.
@@ -95,7 +95,9 @@ Required top-level: `embedding, sources, vectorStore`
 ### `status`
 
 - **`activeJob`** `string` (optional) — ActiveJob is the name of the in-flight ingestion/eval Job, if any.
+- **`activeJobStartedAt`** `string` (optional) — ActiveJobStartedAt records when the in-flight Job (if any) was launched. Used to detect Jobs that are stuck (operator restart, lost watch event) and clear them. Operators compare against the Job's `ActiveDeadlineSeconds` to decide if the Job is "stuck". · `format=date-time`
 - **`autoTuneAttempts`** `integer` (optional) — AutoTuneAttempts counts auto-tune iterations applied so far.
+- **`autoTuneStartedAt`** `string` (optional) — AutoTuneStartedAt records the start time of the current auto-tune run. Cleared when the run ends (converges, exhausts, or is reset by a user spec edit). Together with `AutoTuneAttempts` and `BestRecallPercent` it gives operators a wall-clock view of how long the ladder has been running. Useful for SLI dashboards ("auto-tune convergence time") and alerting when a run exceeds expected duration. · `format=date-time`
 - **`bestChunking`** `object` (optional) — BestChunking is the chunking that achieved BestRecallPercent. When auto-tune exhausts its attempts without meeting the target, the operator lands the KB on this configuration rather than the last (arbitrary) ladder step.
 - **`bestChunking.maxTokens`** `integer` (optional) · `minimum=1`
 - **`bestChunking.overlap`** `integer` (optional) · `minimum=0`

@@ -50,10 +50,25 @@ var (
 		},
 		[]string{"knowledgebase"},
 	)
+
+	// autoTuneDurationSeconds tracks the wall-clock duration of each
+	// completed auto-tune run, per result (converged, exhausted, reset).
+	// Use it as a histogram to build SLO panels like "p95 auto-tune
+	// convergence time" and to alert when a run exceeds expected
+	// duration.
+	autoTuneDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "rag_knowledgebase_autotune_duration_seconds",
+			Help:    "Duration of auto-tune runs (start to settle/reset), per result.",
+			Buckets: prometheus.ExponentialBuckets(30, 2, 12), // 30s .. ~17h
+		},
+		[]string{"knowledgebase", "result"},
+	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(
 		ingestionsTotal, indexedChunks, retrievalRecall, autoTuneAttempts, autoTuneBestRecall,
+		autoTuneDurationSeconds,
 	)
 }

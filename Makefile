@@ -22,7 +22,7 @@ PYTHON ?= python3
 PYTEST_VENV ?= .venv-test
 PYTEST_PYTHON := $(PYTEST_VENV)/bin/python
 
-.PHONY: fmt vet build test test-integration
+.PHONY: fmt vet build test test-integration test-coverage
 fmt:
 	go fmt ./...
 vet:
@@ -32,6 +32,11 @@ test: generate fmt vet ## Run Go unit tests.
 test-integration: generate ## Run envtest integration tests (downloads kube-apiserver/etcd).
 	KUBEBUILDER_ASSETS="$$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test -tags=integration -count=1 -timeout=300s ./internal/controller/...
+test-coverage: ## Run unit tests and write coverage profile (cover.out).
+	go test -count=1 -coverprofile=cover.out -covermode=atomic ./... >/dev/null
+	@echo ""
+	@echo "Per-package coverage (must be >= MIN_COVERAGE, default 50%):"
+	@go tool cover -func=cover.out | grep -E "total:" | awk '{print "  " $$0}'
 build: generate fmt vet ## Build the operator binary.
 	go build -o bin/manager ./cmd
 

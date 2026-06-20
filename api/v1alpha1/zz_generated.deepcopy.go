@@ -410,6 +410,10 @@ func (in *KnowledgeBaseStatus) DeepCopyInto(out *KnowledgeBaseStatus) {
 		*out = new(ChunkingSpec)
 		**out = **in
 	}
+	if in.AutoTuneStartedAt != nil {
+		in, out := &in.AutoTuneStartedAt, &out.AutoTuneStartedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.BestChunking != nil {
 		in, out := &in.BestChunking, &out.BestChunking
 		*out = new(ChunkingSpec)
@@ -428,6 +432,10 @@ func (in *KnowledgeBaseStatus) DeepCopyInto(out *KnowledgeBaseStatus) {
 		in, out := &in.Evaluation, &out.Evaluation
 		*out = new(EvaluationStatus)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.ActiveJobStartedAt != nil {
+		in, out := &in.ActiveJobStartedAt, &out.ActiveJobStartedAt
+		*out = (*in).DeepCopy()
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions

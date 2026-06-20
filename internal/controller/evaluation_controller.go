@@ -33,6 +33,8 @@ func (r *KnowledgeBaseReconciler) startEval(
 		return ctrl.Result{}, ignoreAlreadyExists(err)
 	}
 	kb.Status.ActiveJob = job.Name
+	now := metav1.Now()
+	kb.Status.ActiveJobStartedAt = &now
 	setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "Evaluating", "running retrieval-quality evaluation")
 	r.event(kb, corev1.EventTypeNormal, "EvaluationStarted", "running retrieval-quality evaluation")
 	if err := r.statusUpdate(ctx, kb); err != nil {
@@ -45,6 +47,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, job *batchv1.Job,
 ) (ctrl.Result, bool, error) {
 	kb.Status.ActiveJob = ""
+	kb.Status.ActiveJobStartedAt = nil
 
 	if jobFailed(job) {
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "EvalFailed", "evaluation job failed")
@@ -93,6 +96,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 
 	if !below {
 		kb.Status.Phase = ragv1alpha1.PhaseReady
+		recordAutoTuneDuration(kb, "converged", time.Now())
 		kb.Status.AutoTuneAttempts = 0
 		kb.Status.BestChunking = nil
 		kb.Status.BestRecallPercent = 0
@@ -135,6 +139,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		// Attempts exhausted. Land on the best config observed rather than the
 		// last (arbitrary) ladder step. settleOnBest forces one final re-index;
 		// the subsequent re-eval finds current == best and falls through to Degraded.
+		recordAutoTuneDuration(kb, "exhausted", time.Now())
 		if settleOnBest(kb) {
 			setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "AutoTuneSettling",
 				fmt.Sprintf("auto-tune exhausted; reverting to best config (recall %d%%)",

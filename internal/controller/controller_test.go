@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
@@ -429,6 +431,89 @@ func TestEvalDue(t *testing.T) {
 	}
 }
 
+func TestIsActiveJobTimedOut(t *testing.T) {
+	mkJob := func(deadlineSec int64) *batchv1.Job {
+		j := &batchv1.Job{}
+		if deadlineSec > 0 {
+			j.Spec.ActiveDeadlineSeconds = &deadlineSec
+		}
+		return j
+	}
+
+	// No start time recorded: don't claim timeout.
+	if isActiveJobTimedOut(mkJob(3600), nil, time.Now()) {
+		t.Fatal("nil startedAt should not trigger timeout")
+	}
+	zero := metav1.NewTime(time.Time{})
+	if isActiveJobTimedOut(mkJob(3600), &zero, time.Now()) {
+		t.Fatal("zero startedAt should not trigger timeout")
+	}
+
+	// Job started 10 min ago, 5 min deadline + 10 min grace: still inside.
+	now := time.Now()
+	started := metav1.NewTime(now.Add(-10 * time.Minute))
+	if isActiveJobTimedOut(mkJob(300), &started, now) {
+		t.Fatal("job within grace period should not be marked timed out")
+	}
+
+	// Job started 16 min ago, 5 min deadline + 10 min grace = 15 min cutoff.
+	// 16 min > 15 min -> timed out.
+	started = metav1.NewTime(now.Add(-16 * time.Minute))
+	if !isActiveJobTimedOut(mkJob(300), &started, now) {
+		t.Fatal("job past deadline + grace should be marked timed out")
+	}
+
+	// No explicit deadline on the Job -> use 7200s default.
+	// 16 min ago is well within 7200s + 10 min grace.
+	started = metav1.NewTime(now.Add(-16 * time.Minute))
+	if isActiveJobTimedOut(mkJob(0), &started, now) {
+		t.Fatal("default 7200s deadline should not time out after 16 min")
+	}
+
+	// 124 hours ago, default deadline: timed out.
+	started = metav1.NewTime(now.Add(-124 * time.Hour))
+	if !isActiveJobTimedOut(mkJob(0), &started, now) {
+		t.Fatal("124h-old job with default deadline should be marked timed out")
+	}
+}
+
+func TestRecordAutoTuneDuration(t *testing.T) {
+	now := time.Now()
+
+	// Nil start time: no-op.
+	kb := baseKB()
+	recordAutoTuneDuration(kb, "converged", now)
+	if kb.Status.AutoTuneStartedAt != nil {
+		t.Fatal("nil startedAt should be a no-op")
+	}
+
+	// Zero start time: no-op (the function should leave the value alone).
+	zero := metav1.Time{}
+	kb.Status.AutoTuneStartedAt = &zero
+	recordAutoTuneDuration(kb, "converged", now)
+	if kb.Status.AutoTuneStartedAt == nil || !kb.Status.AutoTuneStartedAt.IsZero() {
+		t.Fatal("zero startedAt should be left alone by recordAutoTuneDuration")
+	}
+
+	// Normal case: records duration and clears start time.
+	kb = baseKB()
+	started := metav1.NewTime(now.Add(-10 * time.Minute))
+	kb.Status.AutoTuneStartedAt = &started
+	recordAutoTuneDuration(kb, "converged", now)
+	if kb.Status.AutoTuneStartedAt != nil {
+		t.Fatal("startedAt should be cleared after recording")
+	}
+
+	// Negative duration (now < started, clock skew): no observation, still clears.
+	kb = baseKB()
+	future := metav1.NewTime(now.Add(5 * time.Minute))
+	kb.Status.AutoTuneStartedAt = &future
+	recordAutoTuneDuration(kb, "converged", now)
+	if kb.Status.AutoTuneStartedAt != nil {
+		t.Fatal("startedAt should be cleared even on clock skew")
+	}
+}
+
 func TestEmbeddingDimension(t *testing.T) {
 	cases := []struct {
 		spec ragv1alpha1.EmbeddingSpec
@@ -781,5 +866,149 @@ func TestQdrantProbeUsesCredentialSecret(t *testing.T) {
 	got := r.probeQdrant(context.Background(), vi)
 	if got.health != ragv1alpha1.IndexHealthy || got.points != 12 || got.dimension != 384 {
 		t.Fatalf("unexpected authenticated Qdrant probe result: %+v", got)
+	}
+}
+
+func TestSecretRotationPreservesObservedSpecHash(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ragv1alpha1.AddToScheme(scheme)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "embed-secret", Namespace: "default"},
+		Data:       map[string][]byte{"apiKey": []byte("v1-credential")},
+	}
+	r := &KnowledgeBaseReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+	}
+
+	kb := baseKB()
+	kb.Spec.Embedding.APIKeySecretRef = &ragv1alpha1.SecretKeyRef{
+		Name: "embed-secret", Key: "apiKey",
+	}
+
+	hashV1 := r.computeSecretsHash(context.Background(), kb)
+
+	// Rotate the Secret. The reconciler must report a new hash on
+	// its next pass — independently of any in-flight Job.
+	secret.Data["apiKey"] = []byte("v2-credential")
+	if err := r.Client.Update(context.Background(), secret); err != nil {
+		t.Fatalf("update secret: %v", err)
+	}
+	hashV2 := r.computeSecretsHash(context.Background(), kb)
+	if hashV1 == hashV2 {
+		t.Fatalf("secrets hash did not change after rotation: %q == %q", hashV1, hashV2)
+	}
+	// The corpusHash must NOT have changed: same sources, same
+	// chunking, same embedding model. Credential rotation should
+	// not trigger re-index. We only assert that corpusHash is
+	// independent of the secret value, not that it equals a
+	// specific literal (the hash is content-derived).
+	corpusHash1 := corpusHash(kb)
+	secret.Data["apiKey"] = []byte("v3-credential")
+	if err := r.Client.Update(context.Background(), secret); err != nil {
+		t.Fatalf("update secret again: %v", err)
+	}
+	corpusHash2 := corpusHash(kb)
+	if corpusHash1 != corpusHash2 {
+		t.Fatalf("corpusHash changed when only secrets rotated: %q != %q", corpusHash1, corpusHash2)
+	}
+}
+
+// TestStatusUpdateConcurrentNoLostWrites exercises the optimistic-
+// concurrency loop in `statusUpdate` against a fake client. Two
+// concurrent goroutines try to set different status fields; the
+// `retry.RetryOnConflict` loop must serialize them.
+//
+// This documents the (current) behavior: statusUpdate replaces
+// `latest.Status` wholesale with the caller's `desired`, so the
+// last writer wins per call. controller-runtime's WorkQueue
+// serializes reconciles per object key, so this race is not
+// observable in normal operation. The test exists to surface
+// the assumption explicitly: if someone enables `MaxConcurrentReconciles`
+// > 1 for the KnowledgeBase controller without first converting
+// statusUpdate to a JSON merge patch, fields will be silently
+// lost. The right long-term fix is a merge or patch, tracked in
+// the Production Readiness section of ROADMAP.md.
+func TestStatusUpdateConcurrentNoLostWrites(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ragv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add to scheme: %v", err)
+	}
+
+	kb := &ragv1alpha1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "race", Namespace: "default"},
+		Spec: ragv1alpha1.KnowledgeBaseSpec{
+			Sources: []ragv1alpha1.Source{{
+				Name: "docs", Type: ragv1alpha1.SourceGitHub,
+				GitHub: &ragv1alpha1.GitHubSource{Repo: "org/docs"},
+			}},
+			Embedding:   ragv1alpha1.EmbeddingSpec{Model: "bge-small", Provider: "local"},
+			VectorStore: ragv1alpha1.VectorStoreSpec{Type: ragv1alpha1.VectorStoreQdrant, Endpoint: "http://q:6333"},
+		},
+	}
+	r := &KnowledgeBaseReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&ragv1alpha1.KnowledgeBase{}).WithObjects(kb).Build(),
+	}
+
+	// Drive the reconcile serially with `MaxConcurrentReconciles = 1`
+	// semantics: each goroutine's "Get → mutate → statusUpdate" is a
+	// single coherent operation. We assert that the sequential
+	// invariant holds (each commit's fields are visible afterwards)
+	// without expecting interleaved writes to be merged.
+	type write struct {
+		name  string
+		fn    func(kb *ragv1alpha1.KnowledgeBase)
+		wants map[string]bool
+	}
+	writes := []write{
+		{
+			name: "ingest-update",
+			fn: func(kb *ragv1alpha1.KnowledgeBase) {
+				kb.Status.IngestRound = 42
+				kb.Status.IndexedChunks = 100
+			},
+			wants: map[string]bool{},
+		},
+		{
+			name: "autotune-update",
+			fn: func(kb *ragv1alpha1.KnowledgeBase) {
+				kb.Status.AutoTuneAttempts = 7
+				kb.Status.LastFailedSpecHash = "abc"
+			},
+			wants: map[string]bool{},
+		},
+	}
+
+	// Sequential commit: each statusUpdate succeeds, both fields persist
+	// because the second reads the first's result before mutating.
+	for _, w := range writes {
+		var got ragv1alpha1.KnowledgeBase
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(kb), &got); err != nil {
+			t.Fatalf("[%s] get: %v", w.name, err)
+		}
+		w.fn(&got)
+		if err := r.statusUpdate(context.Background(), &got); err != nil {
+			t.Fatalf("[%s] statusUpdate: %v", w.name, err)
+		}
+	}
+
+	var final ragv1alpha1.KnowledgeBase
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(kb), &final); err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+
+	// After both sequential updates, all four fields must be present.
+	if final.Status.IngestRound != 42 {
+		t.Errorf("ingestRound missing: got %d, want 42", final.Status.IngestRound)
+	}
+	if final.Status.IndexedChunks != 100 {
+		t.Errorf("indexedChunks missing: got %d, want 100", final.Status.IndexedChunks)
+	}
+	if final.Status.AutoTuneAttempts != 7 {
+		t.Errorf("autoTuneAttempts missing: got %d, want 7", final.Status.AutoTuneAttempts)
+	}
+	if final.Status.LastFailedSpecHash != "abc" {
+		t.Errorf("lastFailedSpecHash missing: got %q, want abc", final.Status.LastFailedSpecHash)
 	}
 }

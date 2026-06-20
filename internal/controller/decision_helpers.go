@@ -171,6 +171,10 @@ func applyAutoTune(kb *ragv1alpha1.KnowledgeBase) {
 	eff := nextChunking(effectiveChunking(kb))
 	kb.Status.EffectiveChunking = &eff
 	kb.Status.AutoTuneAttempts++
+	if kb.Status.AutoTuneStartedAt == nil {
+		now := metav1.Now()
+		kb.Status.AutoTuneStartedAt = &now
+	}
 	kb.Status.PendingRetune = true // owes a re-ingest on the next pass
 	// Clear the last evaluation so a re-eval runs after the tuned re-index even
 	// when no evalSchedule is set; this lets auto-tune iterate up to maxAttempts.
@@ -193,6 +197,13 @@ func recordBest(kb *ragv1alpha1.KnowledgeBase, recall int) {
 // settleOnBest reverts effective chunking to the best-observed config and forces
 // one final re-index, unless the KB is already on it. Returns whether a revert
 // was scheduled.
+// settleOnBest reverts effective chunking to the best-observed config and forces
+// one final re-index, unless the KB is already on it. Returns whether a revert
+// was scheduled.
+//
+// Note: the caller is responsible for calling recordAutoTuneDuration
+// before settleOnBest so the histogram sees the full run duration.
+// settleOnBest no longer clears AutoTuneStartedAt directly.
 func settleOnBest(kb *ragv1alpha1.KnowledgeBase) bool {
 	if kb.Status.BestChunking == nil || effectiveChunking(kb) == *kb.Status.BestChunking {
 		return false
@@ -223,6 +234,21 @@ func toSourceStatus(in []IngestSourceResult) []ragv1alpha1.SourceStatus {
 	return out
 }
 
+// recordAutoTuneDuration observes the wall-clock duration of an
+// auto-tune run and clears `AutoTuneStartedAt`. Called whenever a
+// run ends (converged, exhausted, or reset by a user spec edit).
+// Safe to call when `started` is nil; it's a no-op in that case.
+func recordAutoTuneDuration(kb *ragv1alpha1.KnowledgeBase, result string, now time.Time) {
+	if kb.Status.AutoTuneStartedAt == nil || kb.Status.AutoTuneStartedAt.IsZero() {
+		return
+	}
+	dur := now.Sub(kb.Status.AutoTuneStartedAt.Time).Seconds()
+	if dur > 0 {
+		autoTuneDurationSeconds.WithLabelValues(kb.Name, result).Observe(dur)
+	}
+	kb.Status.AutoTuneStartedAt = nil
+}
+
 func jobComplete(j *batchv1.Job) bool {
 	for _, c := range j.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
@@ -239,6 +265,29 @@ func jobFailed(j *batchv1.Job) bool {
 		}
 	}
 	return false
+}
+
+// isActiveJobTimedOut reports whether an in-flight Job has exceeded its
+// own ActiveDeadlineSeconds. The trigger is a defensive cleanup for
+// the case where the operator lost a watch event (restart, leader
+// handoff) and the cluster didn't GC the Job (e.g. it was never
+// created, or its controller owner is gone).
+//
+// `started` is the time the operator recorded when it launched the
+// Job. `now` is injected for unit-testability. A 10-minute grace
+// beyond the deadline absorbs clock skew and pod-graceful-shutdown
+// time.
+func isActiveJobTimedOut(j *batchv1.Job, started *metav1.Time, now time.Time) bool {
+	if started == nil || started.IsZero() {
+		return false // we don't know when it started; trust the standard
+		// completion / failure detection in reconcileActiveJob.
+	}
+	deadline := int64(7200)
+	if j.Spec.ActiveDeadlineSeconds != nil {
+		deadline = *j.Spec.ActiveDeadlineSeconds
+	}
+	cutoff := started.Add(time.Duration(deadline) * time.Second).Add(10 * time.Minute)
+	return now.After(cutoff)
 }
 
 func jobSpecHash(j *batchv1.Job, fallback string) string {

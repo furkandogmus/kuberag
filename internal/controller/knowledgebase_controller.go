@@ -89,13 +89,22 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	secretsHash := r.computeSecretsHash(ctx, &kb)
 	chash := corpusHash(&kb)
 
-	if kb.Status.ObservedSecretsHash == "" {
+	// Track credential changes. `ObservedSecretsHash` is initialised
+	// on first reconcile and updated on every reconcile when the
+	// currently-observed credentials differ. The new hash is
+	// persisted even if no ingestion runs, so the next Spec/Status
+	// write carries the freshest fingerprint (e.g. for a UI column
+	// or audit log). Secret rotation does NOT trigger re-index by
+	// itself — that path is gated on ObservedSpecHash via
+	// `needsIngest`.
+	if kb.Status.ObservedSecretsHash != secretsHash {
 		kb.Status.ObservedSecretsHash = secretsHash
 	}
 
 	// If the user edited the corpus spec while an auto-tuned chunking override is
 	// active, drop the override so the new ingestion honours the spec.
 	if userEditedSpec(&kb, chash) {
+		recordAutoTuneDuration(&kb, "reset", time.Now())
 		kb.Status.EffectiveChunking = nil
 		kb.Status.AutoTuneAttempts = 0
 		kb.Status.BestChunking = nil
@@ -116,6 +125,28 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					"spec or secrets changed; cancelling in-flight ingest %s", active.Name)
 				_ = r.Delete(ctx, &active, client.PropagationPolicy(metav1.DeletePropagationBackground))
 				kb.Status.ActiveJob = ""
+				kb.Status.ActiveJobStartedAt = nil
+				if err := r.statusUpdate(ctx, &kb); err != nil {
+					return ctrl.Result{}, err
+				}
+			} else if isActiveJobTimedOut(&active, kb.Status.ActiveJobStartedAt, time.Now()) {
+				// Job exists, spec/creds unchanged, but it's been running
+				// longer than its deadline allows. Operator likely lost
+				// a watch event (restart, leader handoff). Treat as
+				// failed and let the next reconcile start a new Job.
+				logger.Info("active job timed out (likely lost watch event)", "job", active.Name,
+					"started", kb.Status.ActiveJobStartedAt)
+				r.event(&kb, corev1.EventTypeWarning, "IngestionStuck",
+					"active job %s has been running past ActiveDeadlineSeconds; clearing and retrying", active.Name)
+				_ = r.Delete(ctx, &active, client.PropagationPolicy(metav1.DeletePropagationBackground))
+				kb.Status.ActiveJob = ""
+				kb.Status.ActiveJobStartedAt = nil
+				kb.Status.LastFailedSpecHash = chash
+				now := metav1.Now()
+				kb.Status.LastFailureTime = &now
+				kb.Status.Phase = ragv1alpha1.PhaseFailed
+				setCondition(&kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+					"IngestionStuck", "active job exceeded ActiveDeadlineSeconds; cleared")
 				if err := r.statusUpdate(ctx, &kb); err != nil {
 					return ctrl.Result{}, err
 				}

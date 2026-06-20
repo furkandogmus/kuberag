@@ -62,8 +62,26 @@ jobs:
           make api-docs
           git diff --exit-code || (echo "::error::docs/API.md out of date — run 'make api-docs'"; exit 1)
 
-      - name: unit tests
-        run: go test -count=1 ./...
+      - name: unit tests with coverage
+        run: |
+          go test -count=1 -coverprofile=cover.out -covermode=atomic ./...
+          TOTAL=$(go tool cover -func=cover.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: ${TOTAL}%"
+          # Fail if total coverage drops below the configured minimum.
+          # The default 10% is intentionally low to start; bump via
+          # MIN_COVERAGE env as coverage grows. Internal package
+          # targets (e.g. controller at 50%) should be tracked
+          # separately.
+          MIN_COVERAGE="${MIN_COVERAGE:-10}"
+          awk -v t="$TOTAL" -v m="$MIN_COVERAGE" 'BEGIN { if (t+0 < m+0) { print "::error::Coverage " t "% below minimum " m "%"; exit 1 } }'
+
+      - name: upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: cover.out
+          retention-days: 14
 
       - name: integration tests (envtest)
         run: |

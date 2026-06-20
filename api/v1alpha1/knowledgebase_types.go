@@ -83,6 +83,9 @@ type S3Source struct {
 
 // WebSource crawls one or more seed URLs.
 type WebSource struct {
+	// URLs is the list of seed URLs the crawler starts from. Limited to
+	// 20 to keep the controller's reconcile and the worker's URL queue
+	// bounded; if you need more, split into multiple KnowledgeBases.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=20
 	// +kubebuilder:validation:items:Pattern=`^https?://`
@@ -337,6 +340,10 @@ type AutoTuneSpec struct {
 // KnowledgeBaseSpec is the desired knowledge state.
 // +kubebuilder:validation:XValidation:rule="self.sources.all(s1, size(self.sources.filter(s2, s2.name == s1.name)) == 1)",message="source names must be unique within a KnowledgeBase"
 type KnowledgeBaseSpec struct {
+	// Sources is the list of input sources to index. Limited to 5
+	// per KnowledgeBase; if you need more, split into multiple
+	// KnowledgeBases (each gets its own IngestionRun history and
+	// failure isolation).
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=5
 	Sources []Source `json:"sources"`
@@ -432,6 +439,15 @@ type KnowledgeBaseStatus struct {
 	// AutoTuneAttempts counts auto-tune iterations applied so far.
 	// +optional
 	AutoTuneAttempts int `json:"autoTuneAttempts,omitempty"`
+	// AutoTuneStartedAt records the start time of the current auto-tune
+	// run. Cleared when the run ends (converges, exhausts, or is reset
+	// by a user spec edit). Together with `AutoTuneAttempts` and
+	// `BestRecallPercent` it gives operators a wall-clock view of how
+	// long the ladder has been running. Useful for SLI dashboards
+	// ("auto-tune convergence time") and alerting when a run exceeds
+	// expected duration.
+	// +optional
+	AutoTuneStartedAt *metav1.Time `json:"autoTuneStartedAt,omitempty"`
 	// PendingRetune marks that auto-tune has changed the effective chunking and a
 	// re-index is owed, without disturbing ObservedSpecHash (which keeps tracking
 	// the last ingested spec so user spec edits are still detected mid-tune).
@@ -461,6 +477,12 @@ type KnowledgeBaseStatus struct {
 	// ActiveJob is the name of the in-flight ingestion/eval Job, if any.
 	// +optional
 	ActiveJob string `json:"activeJob,omitempty"`
+	// ActiveJobStartedAt records when the in-flight Job (if any) was
+	// launched. Used to detect Jobs that are stuck (operator restart,
+	// lost watch event) and clear them. Operators compare against the
+	// Job's `ActiveDeadlineSeconds` to decide if the Job is "stuck".
+	// +optional
+	ActiveJobStartedAt *metav1.Time `json:"activeJobStartedAt,omitempty"`
 	// IngestRound increments for every ingestion attempt so retries never
 	// collide with a still-present finished Job.
 	// +optional

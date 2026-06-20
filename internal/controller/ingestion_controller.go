@@ -30,6 +30,7 @@ func (r *KnowledgeBaseReconciler) reconcileActiveJob(
 		if apierrors.IsNotFound(err) {
 			// Job GC'd before we observed completion; clear and move on.
 			kb.Status.ActiveJob = ""
+			kb.Status.ActiveJobStartedAt = nil
 			return ctrl.Result{}, false, r.statusUpdate(ctx, kb)
 		}
 		return ctrl.Result{}, true, err
@@ -47,6 +48,7 @@ func (r *KnowledgeBaseReconciler) reconcileActiveJob(
 		return r.finalizeEval(ctx, kb, &job)
 	default:
 		kb.Status.ActiveJob = ""
+		kb.Status.ActiveJobStartedAt = nil
 		return ctrl.Result{}, true, r.statusUpdate(ctx, kb)
 	}
 }
@@ -57,6 +59,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	if jobFailed(job) {
 		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		kb.Status.ActiveJob = ""
+		kb.Status.ActiveJobStartedAt = nil
 		now := metav1.Now()
 		kb.Status.LastFailedSpecHash = hash
 		kb.Status.LastFailureTime = &now
@@ -95,6 +98,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	now := metav1.Now()
 	kb.Status.LastIndexedTime = &now
 	kb.Status.ActiveJob = ""
+	kb.Status.ActiveJobStartedAt = nil
 	kb.Status.ObservedGeneration = kb.Generation
 
 	indexedChunks.WithLabelValues(kb.Name).Set(float64(result.TotalChunks))
@@ -220,6 +224,8 @@ func (r *KnowledgeBaseReconciler) startIngest(
 
 	kb.Status.Phase = ragv1alpha1.PhaseIngesting
 	kb.Status.ActiveJob = job.Name
+	now := metav1.Now()
+	kb.Status.ActiveJobStartedAt = &now
 	setCondition(kb, ragv1alpha1.ConditionIngesting, metav1.ConditionTrue, "JobCreated",
 		fmt.Sprintf("%s ingestion started (%s)", mode, reason))
 	setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse, "Ingesting", "ingestion in progress")
