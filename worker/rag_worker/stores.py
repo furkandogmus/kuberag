@@ -353,7 +353,8 @@ class PgVectorStore(VectorStore):
         import psycopg
         import psycopg.sql
 
-        self.table = _sanitize(collection)
+        self.collection = _sanitize(collection)
+        self.table = self.collection
         self._tbl = psycopg.sql.Identifier(self.table)
         self._src_idx = psycopg.sql.Identifier(f"{self.table}_source_idx")
         self.distance = distance
