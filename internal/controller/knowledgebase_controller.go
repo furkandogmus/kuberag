@@ -105,6 +105,25 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	eff := effectiveChunking(&kb)
 
 	// Finalize any in-flight job before deciding new work.
+	// If the spec changed while an ingest Job is running, cancel it so the
+	// new spec takes effect immediately rather than waiting for completion.
+	if kb.Status.ActiveJob != "" && kb.Status.ActiveJob != kb.Name+"-cleanup" {
+		var active batchv1.Job
+		key := types.NamespacedName{Namespace: kb.Namespace, Name: kb.Status.ActiveJob}
+		if err := r.Get(ctx, key, &active); err == nil {
+			if jobType(&active) == jobTypeIngest && kb.Status.ObservedSpecHash != "" && kb.Status.ObservedSpecHash != hash {
+				logger.Info("cancelling stale ingest job due to spec change", "job", active.Name)
+				r.event(&kb, corev1.EventTypeNormal, "IngestionCancelled",
+					"spec changed; cancelling in-flight ingest %s", active.Name)
+				_ = r.Delete(ctx, &active, client.PropagationPolicy(metav1.DeletePropagationBackground))
+				kb.Status.ActiveJob = ""
+				if err := r.statusUpdate(ctx, &kb); err != nil {
+					return ctrl.Result{}, err
+				}
+				// Fall through to start a new ingest with the updated spec.
+			}
+		}
+	}
 	if kb.Status.ActiveJob != "" {
 		res, handled, err := r.reconcileActiveJob(ctx, &kb, eff, hash)
 		if err != nil || handled {
@@ -175,6 +194,8 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 			return ctrl.Result{}, true, err
 		}
 		r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 		r.deleteJob(ctx, job)
 		return ctrl.Result{RequeueAfter: time.Minute}, true, nil
 	}
@@ -207,6 +228,8 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		return ctrl.Result{}, true, err
 	}
 	r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
 }
@@ -223,6 +246,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			return ctrl.Result{}, true, err
 		}
 		r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 		return ctrl.Result{Requeue: true}, true, nil
 	}
 
@@ -252,6 +276,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			return ctrl.Result{}, true, err
 		}
 		r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 		return ctrl.Result{Requeue: true}, true, nil
 	}
 
@@ -273,6 +298,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 			return ctrl.Result{}, true, err
 		}
 		r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 		return ctrl.Result{Requeue: true}, true, nil
 	}
 
@@ -295,6 +321,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 				return ctrl.Result{}, true, err
 			}
 			r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 			return ctrl.Result{Requeue: true}, true, nil
 		}
 
@@ -312,6 +339,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 				return ctrl.Result{}, true, err
 			}
 			r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 			return ctrl.Result{Requeue: true}, true, nil
 		}
 	}
@@ -328,6 +356,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		return ctrl.Result{}, true, err
 	}
 	r.deleteResult(ctx, kb.Namespace, job.Name)
+		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
 	return ctrl.Result{Requeue: true}, true, nil
 }
 
@@ -348,8 +377,13 @@ func (r *KnowledgeBaseReconciler) startIngest(
 	}
 
 	kb.Status.IngestRound++
-	job, err := buildIngestJob(kb, hash, mode, eff)
+	job, specJSON, err := buildIngestJob(kb, hash, mode, eff)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+	// Create spec ConfigMap first so the Job volume mount resolves.
+	cm := specConfigMap(kb.Namespace, specConfigMapName(job.Name), specJSON)
+	if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
 		return ctrl.Result{}, err
 	}
 	if err := ctrl.SetControllerReference(kb, job, r.Scheme); err != nil {
@@ -375,8 +409,12 @@ func (r *KnowledgeBaseReconciler) startEval(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, eff ragv1alpha1.ChunkingSpec, hash string,
 ) (ctrl.Result, error) {
 	kb.Status.EvalRound++
-	job, err := buildEvalJob(kb, hash, kb.Status.EvalRound, eff)
+	job, specJSON, err := buildEvalJob(kb, hash, kb.Status.EvalRound, eff)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+	cm := specConfigMap(kb.Namespace, specConfigMapName(job.Name), specJSON)
+	if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
 		return ctrl.Result{}, err
 	}
 	if err := ctrl.SetControllerReference(kb, job, r.Scheme); err != nil {
@@ -405,9 +443,13 @@ func (r *KnowledgeBaseReconciler) reconcileDelete(ctx context.Context, kb *ragv1
 	err := r.Get(ctx, types.NamespacedName{Namespace: kb.Namespace, Name: cleanupName}, &job)
 	switch {
 	case apierrors.IsNotFound(err):
-		cj, berr := buildCleanupJob(kb)
+		cj, specJSON, berr := buildCleanupJob(kb)
 		if berr != nil {
 			return ctrl.Result{}, berr
+		}
+		cm := specConfigMap(kb.Namespace, specConfigMapName(cj.Name), specJSON)
+		if cerr := r.Create(ctx, cm); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
+			return ctrl.Result{}, cerr
 		}
 		// No controller ref: the KB is being deleted, so the Job must outlive it.
 		if cerr := r.Create(ctx, cj); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
@@ -771,15 +813,25 @@ func jobSpecHash(j *batchv1.Job, fallback string) string {
 }
 
 func jobEffectiveChunking(j *batchv1.Job, fallback ragv1alpha1.ChunkingSpec) ragv1alpha1.ChunkingSpec {
-	raw, ok := jobEnvValue(j, "KB_SPEC_JSON")
-	if !ok {
+	if j.Labels == nil || j.Labels[labelChunking] == "" {
 		return fallback
 	}
-	var spec ragv1alpha1.KnowledgeBaseSpec
-	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+	var c ragv1alpha1.ChunkingSpec
+	parts := strings.SplitN(j.Labels[labelChunking], "|", 3)
+	if len(parts) == 3 {
+		c.Strategy = ragv1alpha1.ChunkingStrategy(parts[0])
+		fmt.Sscanf(parts[1], "%d", &c.MaxTokens)
+		fmt.Sscanf(parts[2], "%d", &c.Overlap)
+	}
+	if c.Strategy == "" {
 		return fallback
 	}
-	return specChunking(&ragv1alpha1.KnowledgeBase{Spec: spec})
+	return c
+}
+
+// chunkingLabel serialises a chunking spec to a compact label value.
+func chunkingLabel(c ragv1alpha1.ChunkingSpec) string {
+	return fmt.Sprintf("%s|%d|%d", c.Strategy, c.MaxTokens, c.Overlap)
 }
 
 func jobEnvValue(j *batchv1.Job, name string) (string, bool) {

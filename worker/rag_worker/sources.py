@@ -204,11 +204,12 @@ def _s3_list(src: dict):
 
 
 def s3_revision(src: dict) -> str | None:
+    """Cheap revision probe listed keys + ETags (no object downloads)."""
     try:
         _, objs = _s3_list(src)
     except Exception:
         return None
-    return _hash(*[f"{k}:{e}:{s}" for k, e, s in objs])
+    return _hash(*[f"{k}:{e}" for k, e, _ in objs])
 
 
 def fetch_s3(src: dict, dest: Path) -> SourceDocs:

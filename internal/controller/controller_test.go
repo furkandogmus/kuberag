@@ -96,7 +96,7 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 	kb := baseKB()
 	jobEff := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 500, Overlap: 50}
-	job, err := buildIngestJob(kb, "oldhash", ragv1alpha1.IngestFull, jobEff)
+	job, _, err := buildIngestJob(kb, "oldhash", ragv1alpha1.IngestFull, jobEff)
 	if err != nil {
 		t.Fatalf("buildIngestJob returned error: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestAutoTuneHelpers(t *testing.T) {
 func TestSecurityContextHardening(t *testing.T) {
 	kb := baseKB()
 	// Test baseJob security context and volumes
-	job, err := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	job, err := baseJob(kb, "test-job", "ingest", "hash123", "test-job-spec", []string{"ingest"}, nil)
 	if err != nil {
 		t.Fatalf("baseJob returned error: %v", err)
 	}
@@ -426,27 +426,63 @@ func TestSecurityContextHardening(t *testing.T) {
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.RunAsNonRoot == nil || !*podSpec.SecurityContext.RunAsNonRoot {
 		t.Error("expected Job pod security context with RunAsNonRoot=true")
 	}
-	if len(podSpec.Volumes) != 1 || podSpec.Volumes[0].Name != "scratch" {
+	if len(podSpec.Volumes) != 2 {
+		t.Errorf("expected 2 volumes (scratch + spec), got %d", len(podSpec.Volumes))
+	}
+	var hasScratchVol, hasSpecVol bool
+	for _, v := range podSpec.Volumes {
+		if v.Name == "scratch" {
+			hasScratchVol = true
+		}
+		if v.Name == "spec" {
+			hasSpecVol = true
+		}
+	}
+	if !hasScratchVol {
 		t.Error("expected Job pod to have 'scratch' volume")
+	}
+	if !hasSpecVol {
+		t.Error("expected Job pod to have 'spec' ConfigMap volume")
 	}
 
 	container := podSpec.Containers[0]
 	if container.SecurityContext == nil || container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
 		t.Error("expected Job container security context with AllowPrivilegeEscalation=false and ReadOnlyRootFilesystem=true")
 	}
-	if len(container.VolumeMounts) != 1 || container.VolumeMounts[0].Name != "scratch" || container.VolumeMounts[0].MountPath != "/scratch" {
+	if len(container.VolumeMounts) != 2 {
+		t.Errorf("expected 2 volume mounts (scratch + spec), got %d", len(container.VolumeMounts))
+	}
+	var hasScratchMount, hasSpecMount bool
+	for _, m := range container.VolumeMounts {
+		if m.Name == "scratch" && m.MountPath == "/scratch" {
+			hasScratchMount = true
+		}
+		if m.Name == "spec" && m.MountPath == "/etc/kuberag" {
+			hasSpecMount = true
+		}
+	}
+	if !hasScratchMount {
 		t.Error("expected Job container to have 'scratch' volume mount at /scratch")
+	}
+	if !hasSpecMount {
+		t.Error("expected Job container to have 'spec' volume mount at /etc/kuberag")
 	}
 
 	// Verify env vars
-	var hasHome bool
+	var hasHome, hasSpecPath bool
 	for _, env := range container.Env {
 		if env.Name == "HOME" && env.Value == "/scratch" {
 			hasHome = true
 		}
+		if env.Name == "KB_SPEC_PATH" && env.Value == "/etc/kuberag/spec.json" {
+			hasSpecPath = true
+		}
 	}
 	if !hasHome {
 		t.Error("expected Job container to have HOME=/scratch environment variable")
+	}
+	if !hasSpecPath {
+		t.Error("expected Job container to have KB_SPEC_PATH=/etc/kuberag/spec.json environment variable")
 	}
 
 	// Test desiredDeployment security context and volumes
@@ -530,7 +566,7 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 		{Key: "cpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	}
 
-	job, err := baseJob(kb, "test-job", "ingest", "hash123", []string{"ingest"}, nil)
+	job, err := baseJob(kb, "test-job", "ingest", "hash123", "test-job-spec", []string{"ingest"}, nil)
 	if err != nil {
 		t.Fatalf("baseJob returned error: %v", err)
 	}
@@ -634,7 +670,7 @@ func TestInvalidIngestionResourcesReturnError(t *testing.T) {
 	kb := baseKB()
 	kb.Spec.Ingestion.Resources = &ragv1alpha1.ResourceRequirements{CPU: "not-a-quantity"}
 
-	if _, err := buildIngestJob(kb, "hash123", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
+	if _, _, err := buildIngestJob(kb, "hash123", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
 		t.Fatal("expected invalid ingestion resources to return an error")
 	}
 }

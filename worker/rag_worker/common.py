@@ -13,9 +13,21 @@ def log(msg: str) -> None:
 
 
 def load_spec() -> dict:
+    """Load the KnowledgeBase spec from the mounted ConfigMap file.
+
+    The operator mounts a ConfigMap at /etc/kuberag/spec.json. Falls back to
+    the legacy KB_SPEC_JSON env var for backward compatibility.
+    """
+    path = os.environ.get("KB_SPEC_PATH", "")
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.loads(f.read())
+        except (json.JSONDecodeError, OSError):
+            pass
     raw = os.environ.get("KB_SPEC_JSON")
     if not raw:
-        sys.exit("KB_SPEC_JSON is not set")
+        sys.exit("KB_SPEC_PATH is not set and no KB_SPEC_JSON fallback")
     return json.loads(raw)
 
 

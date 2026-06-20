@@ -308,7 +308,7 @@ func TestFailedIngestionAdvancesToUniqueRetryName(t *testing.T) {
 	}
 	previousName := job.Name
 	kb.Status.IngestRound++
-	retry, err := buildIngestJob(kb, specHash(kb, ""), ragv1alpha1.IngestFull, effectiveChunking(kb))
+	retry, _, err := buildIngestJob(kb, specHash(kb, ""), ragv1alpha1.IngestFull, effectiveChunking(kb))
 	if err != nil {
 		t.Fatalf("build retry job: %v", err)
 	}
