@@ -37,6 +37,7 @@ func (r *VectorIndexReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	probe := r.probe(ctx, &vi)
 
+	vi.Status.ObservedGeneration = vi.Generation
 	vi.Status.Health = probe.health
 	vi.Status.PointCount = probe.points
 	vi.Status.Dimension = probe.dimension
@@ -109,10 +110,14 @@ func (r *VectorIndexReconciler) probeQdrant(ctx context.Context, vi *ragv1alpha1
 	url := fmt.Sprintf("%s/collections/%s", vi.Spec.Store.Endpoint, collection)
 
 	httpClient := r.HTTP
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 5 * time.Second}
+	timeout := vi.Spec.ProbeTimeoutSeconds
+	if timeout < 1 {
+		timeout = 5
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout+1)*time.Second)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {

@@ -142,6 +142,7 @@ spec:
                   schedule:
                     description: Schedule is a standard cron expression (5 fields).
                       Empty disables scheduled reindexing.
+                    pattern: ^((\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)\s+){4}(\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)$
                     type: string
                 type: object
               ingestion:
@@ -1166,9 +1167,12 @@ spec:
                     default: true
                     type: boolean
                   evalSchedule:
-                    description: EvalSchedule is a cron expression for running evaluations.
+                    description: EvalSchedule is a cron expression for running evaluations
+                      (5-field crontab).
+                    pattern: ^((\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)\s+){4}(\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)$
                     type: string
                   minimumRecallPercent:
+                    default: 0
                     description: |-
                       MinimumRecallPercent is the recall@TopK target (0-100). Below this the KB is
                       marked degraded and, if AutoTune is enabled, the operator adjusts chunking.
@@ -1201,6 +1205,8 @@ spec:
                           type: string
                         repo:
                           description: Repo in "owner/name" form, e.g. "qdrant/qdrant".
+                          minLength: 1
+                          pattern: ^[^/]+/[^/]+$
                           type: string
                         tokenSecretRef:
                           description: TokenSecretRef references a Secret key holding
@@ -1241,6 +1247,7 @@ spec:
                           - name
                           type: object
                         bucket:
+                          minLength: 1
                           type: string
                         endpoint:
                           description: Endpoint for S3-compatible stores (e.g. MinIO).
@@ -1316,6 +1323,15 @@ spec:
                     rule: self.type != 's3' || has(self.s3)
                   - message: web block required when type is web
                     rule: self.type != 'web' || has(self.web)
+                  - message: source must have exactly one backend block (both github
+                      and s3 set)
+                    rule: '!(has(self.github) && has(self.s3))'
+                  - message: source must have exactly one backend block (both github
+                      and web set)
+                    rule: '!(has(self.github) && has(self.web))'
+                  - message: source must have exactly one backend block (both s3 and
+                      web set)
+                    rule: '!(has(self.s3) && has(self.web))'
                 maxItems: 5
                 minItems: 1
                 type: array
@@ -1355,6 +1371,7 @@ spec:
                     description: |-
                       Endpoint of the vector store, e.g. "http://qdrant:6333" or a
                       "postgresql://host/db" DSN for pgvector.
+                    minLength: 1
                     type: string
                   type:
                     default: qdrant

@@ -1000,6 +1000,7 @@ spec:
                       "llama-3.3-70b-versatile", "gemini-2.0-flash".
                     type: string
                   provider:
+                    default: openai
                     description: |-
                       Provider of the chat model (all spoken via the OpenAI-compatible API):
                         openai | openrouter | groq | gemini | openai-compatible
@@ -1145,6 +1146,7 @@ spec:
                     type: object
                 type: object
               scoreThresholdPercent:
+                default: 0
                 description: ScoreThresholdPercent drops results below this similarity
                   (0-100).
                 maximum: 100
@@ -1261,6 +1263,10 @@ spec:
                 format: int64
                 type: integer
               phase:
+                enum:
+                - Pending
+                - Available
+                - Progressing
                 type: string
               readyReplicas:
                 format: int32

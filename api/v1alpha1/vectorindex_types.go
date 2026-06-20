@@ -18,6 +18,11 @@ type VectorIndexSpec struct {
 	// +kubebuilder:validation:Minimum=10
 	// +optional
 	ProbeIntervalSeconds int `json:"probeIntervalSeconds,omitempty"`
+	// ProbeTimeoutSeconds is the HTTP request timeout for collection health probes.
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ProbeTimeoutSeconds int `json:"probeTimeoutSeconds,omitempty"`
 }
 
 // VectorIndexHealth is the observed health of the collection.
@@ -33,6 +38,9 @@ const (
 
 // VectorIndexStatus is the observed collection state.
 type VectorIndexStatus struct {
+	// ObservedGeneration is the .metadata.generation last reconciled.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +optional
 	Health VectorIndexHealth `json:"health,omitempty"`
 	// +optional

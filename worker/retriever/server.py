@@ -96,7 +96,7 @@ def _ensure() -> None:
     if _RERANK and _reranker is None:
         from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-        model = os.environ.get("RERANK_MODEL") or "Xenova/ms-marco-MiniLM-L-6-v2"
+        model = os.environ.get("RERANK_MODEL") or "bge-reranker-base"
         _reranker = TextCrossEncoder(model_name=model)
     if _GEN_ENABLED and _gen_client is None:
         from openai import OpenAI

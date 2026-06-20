@@ -149,6 +149,7 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		{Name: "VECTORSTORE_TYPE", Value: string(kb.Spec.VectorStore.Type)},
 		{Name: "VECTORSTORE_ENDPOINT", Value: kb.Spec.VectorStore.Endpoint},
 		{Name: "VECTORSTORE_COLLECTION", Value: collection},
+		{Name: "DISTANCE", Value: string(kb.Spec.VectorStore.Distance)},
 		{Name: "EMBEDDING_MODEL", Value: emb.Model},
 		// Query embedding must use the same provider as ingestion.
 		{Name: "EMBEDDING_PROVIDER", Value: emb.Provider},

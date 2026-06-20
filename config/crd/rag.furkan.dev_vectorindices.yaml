@@ -74,6 +74,12 @@ spec:
                 description: ProbeIntervalSeconds controls how often health is checked.
                 minimum: 10
                 type: integer
+              probeTimeoutSeconds:
+                default: 5
+                description: ProbeTimeoutSeconds is the HTTP request timeout for collection
+                  health probes.
+                minimum: 1
+                type: integer
               store:
                 description: VectorStoreSpec describes where embeddings are written.
                 properties:
@@ -106,6 +112,7 @@ spec:
                     description: |-
                       Endpoint of the vector store, e.g. "http://qdrant:6333" or a
                       "postgresql://host/db" DSN for pgvector.
+                    minLength: 1
                     type: string
                   type:
                     default: qdrant
@@ -198,6 +205,10 @@ spec:
                 type: string
               message:
                 type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation last reconciled.
+                format: int64
+                type: integer
               pointCount:
                 format: int64
                 type: integer

@@ -34,6 +34,7 @@ type GenerationSpec struct {
 	// Provider of the chat model (all spoken via the OpenAI-compatible API):
 	//   openai | openrouter | groq | gemini | openai-compatible
 	// +kubebuilder:validation:Enum=openai;openrouter;groq;gemini;openai-compatible
+	// +kubebuilder:default=openai
 	Provider string `json:"provider"`
 	// Model name, e.g. "gpt-4o-mini", "google/gemini-2.0-flash-exp:free",
 	// "llama-3.3-70b-versatile", "gemini-2.0-flash".
@@ -83,6 +84,7 @@ type RetrieverSpec struct {
 	// +optional
 	HybridDensePercent *int `json:"hybridDensePercent,omitempty"`
 	// ScoreThresholdPercent drops results below this similarity (0-100).
+	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +optional
@@ -113,6 +115,7 @@ type RetrieverSpec struct {
 
 // RetrieverStatus is the observed serving state.
 type RetrieverStatus struct {
+	// +kubebuilder:validation:Enum=Pending;Available;Progressing
 	// +optional
 	Phase string `json:"phase,omitempty"`
 	// +optional

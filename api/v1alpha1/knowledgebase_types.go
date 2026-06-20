@@ -23,6 +23,9 @@ const (
 // +kubebuilder:validation:XValidation:rule="self.type != 'github' || has(self.github)",message="github block required when type is github"
 // +kubebuilder:validation:XValidation:rule="self.type != 's3' || has(self.s3)",message="s3 block required when type is s3"
 // +kubebuilder:validation:XValidation:rule="self.type != 'web' || has(self.web)",message="web block required when type is web"
+// +kubebuilder:validation:XValidation:rule="!(has(self.github) && has(self.s3))",message="source must have exactly one backend block (both github and s3 set)"
+// +kubebuilder:validation:XValidation:rule="!(has(self.github) && has(self.web))",message="source must have exactly one backend block (both github and web set)"
+// +kubebuilder:validation:XValidation:rule="!(has(self.s3) && has(self.web))",message="source must have exactly one backend block (both s3 and web set)"
 type Source struct {
 	// Name uniquely identifies this source within the KnowledgeBase. Used to
 	// track per-source sync state for incremental ingestion.
@@ -43,6 +46,8 @@ type Source struct {
 // GitHubSource points at a GitHub repository.
 type GitHubSource struct {
 	// Repo in "owner/name" form, e.g. "qdrant/qdrant".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[^/]+/[^/]+$`
 	Repo string `json:"repo"`
 	// Ref is the branch, tag or commit to ingest. Defaults to the repo default branch.
 	// +optional
@@ -57,6 +62,7 @@ type GitHubSource struct {
 
 // S3Source points at objects in an S3-compatible bucket.
 type S3Source struct {
+	// +kubebuilder:validation:MinLength=1
 	Bucket string `json:"bucket"`
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
@@ -186,6 +192,7 @@ type VectorStoreSpec struct {
 	Type VectorStoreType `json:"type"`
 	// Endpoint of the vector store, e.g. "http://qdrant:6333" or a
 	// "postgresql://host/db" DSN for pgvector.
+	// +kubebuilder:validation:MinLength=1
 	Endpoint string `json:"endpoint"`
 	// Collection (or table) name. Defaults to the KnowledgeBase name.
 	// +optional
@@ -205,6 +212,7 @@ type VectorStoreSpec struct {
 // FreshnessSpec controls how often the source is re-synced.
 type FreshnessSpec struct {
 	// Schedule is a standard cron expression (5 fields). Empty disables scheduled reindexing.
+	// +kubebuilder:validation:Pattern=`^((\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)\s+){4}(\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)$`
 	// +optional
 	Schedule string `json:"schedule,omitempty"`
 }
@@ -255,7 +263,8 @@ type RetrievalQualitySpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
-	// EvalSchedule is a cron expression for running evaluations.
+	// EvalSchedule is a cron expression for running evaluations (5-field crontab).
+	// +kubebuilder:validation:Pattern=`^((\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)\s+){4}(\*|\d+(-\d+)?(/\d+)?|\d+(,\d+(-\d+)?(/\d+)?)*)$`
 	// +optional
 	EvalSchedule string `json:"evalSchedule,omitempty"`
 	// DatasetRef references a ConfigMap with key "dataset.jsonl"; each line is
@@ -267,6 +276,7 @@ type RetrievalQualitySpec struct {
 	TopK int `json:"topK,omitempty"`
 	// MinimumRecallPercent is the recall@TopK target (0-100). Below this the KB is
 	// marked degraded and, if AutoTune is enabled, the operator adjusts chunking.
+	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +optional
