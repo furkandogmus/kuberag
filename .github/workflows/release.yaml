@@ -27,6 +27,7 @@ concurrency:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 jobs:
   images:
@@ -69,13 +70,24 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
+        id: build-and-push
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}@${{ steps.build-and-push.outputs.digest }}

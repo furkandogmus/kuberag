@@ -37,7 +37,18 @@ func (r *KnowledgeBaseReconciler) reconcileActiveJob(
 	}
 
 	if !jobComplete(&job) && !jobFailed(&job) {
-		// Still running.
+		// Still running. If this is an ingest job and a cron-based freshness
+		// ticks during the run, flag a deferred ingestion so it isn't silently dropped.
+		if jobType(&job) == jobTypeIngest && kb.Spec.Freshness.Schedule != "" {
+			var last time.Time
+			if kb.Status.LastIndexedTime != nil {
+				last = kb.Status.LastIndexedTime.Time
+			}
+			if cronDue(kb.Spec.Freshness.Schedule, last, time.Now()) {
+				kb.Status.DeferCronIngest = true
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, true, r.statusUpdate(ctx, kb)
+			}
+		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, true, nil
 	}
 
@@ -57,13 +68,17 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, job *batchv1.Job, eff ragv1alpha1.ChunkingSpec, hash, secretsHash string,
 ) (ctrl.Result, bool, error) {
 	if jobFailed(job) {
+		// Read checkpoint before clearing access so the next attempt can resume.
+		checkpoint := r.readCheckpointResult(ctx, kb.Namespace, job.Name)
+		r.clearWorkerConfigMapAccess(ctx, kb)
 		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		kb.Status.ActiveJob = ""
 		kb.Status.ActiveJobStartedAt = nil
+		kb.Status.LastCheckpoint = checkpoint
 		now := metav1.Now()
 		kb.Status.LastFailedSpecHash = hash
 		kb.Status.LastFailureTime = &now
-		ingestionsTotal.WithLabelValues(kb.Name, "failed").Inc()
+		ingestionsTotal.WithLabelValues(kb.Namespace, "failed").Inc()
 		setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse, "IngestionFailed", "ingestion job failed")
 		setCondition(kb, ragv1alpha1.ConditionIngesting, metav1.ConditionFalse, "Failed", "ingestion job failed")
 		r.event(kb, corev1.EventTypeWarning, "IngestionFailed", "ingestion job %s failed", job.Name)
@@ -73,6 +88,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		r.finalizeIngestionRun(ctx, kb.Namespace, job.Name, ragv1alpha1.IngestionRunFailed, 0, nil, "ingestion job failed")
 		r.deleteResult(ctx, kb.Namespace, job.Name)
 		r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+		r.deleteCheckpointConfigMap(ctx, kb.Namespace, job.Name)
 		r.deleteJob(ctx, job)
 		return ctrl.Result{RequeueAfter: time.Minute}, true, nil
 	}
@@ -82,12 +98,14 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 		// Result not yet visible; retry shortly.
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 	}
+	r.clearWorkerConfigMapAccess(ctx, kb)
 
 	kb.Status.Phase = ragv1alpha1.PhaseReady
 	kb.Status.ObservedSpecHash = hash
 	kb.Status.ObservedSecretsHash = secretsHash
 	kb.Status.LastFailedSpecHash = ""
 	kb.Status.LastFailureTime = nil
+	kb.Status.LastCheckpoint = nil
 	kb.Status.ObservedEmbeddingModel = kb.Spec.Embedding.Model
 	emb := kb.Spec.Embedding.DeepCopy()
 	kb.Status.ObservedEmbedding = emb
@@ -101,8 +119,8 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	kb.Status.ActiveJobStartedAt = nil
 	kb.Status.ObservedGeneration = kb.Generation
 
-	indexedChunks.WithLabelValues(kb.Name).Set(float64(result.TotalChunks))
-	ingestionsTotal.WithLabelValues(kb.Name, "succeeded").Inc()
+	indexedChunks.WithLabelValues(kb.Namespace).Set(float64(result.TotalChunks))
+	ingestionsTotal.WithLabelValues(kb.Namespace, "succeeded").Inc()
 	setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionTrue, "IngestionComplete",
 		fmt.Sprintf("indexed %d chunks", result.TotalChunks))
 	setCondition(kb, ragv1alpha1.ConditionIngesting, metav1.ConditionFalse, "Complete", "ingestion finished")
@@ -113,11 +131,12 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	r.finalizeIngestionRun(ctx, kb.Namespace, job.Name, ragv1alpha1.IngestionRunSucceeded, result.TotalChunks, result.Sources, "")
 	r.deleteResult(ctx, kb.Namespace, job.Name)
 	r.deleteSpecConfigMap(ctx, kb.Namespace, job.Name)
+	r.deleteCheckpointConfigMap(ctx, kb.Namespace, job.Name)
 	r.deleteJob(ctx, job)
 	return ctrl.Result{Requeue: true}, true, nil
 }
 
-func (r *KnowledgeBaseReconciler) finalizeIngestionRun(ctx context.Context, ns, name string, phase ragv1alpha1.IngestionRunPhase, chunks int, sources []IngestSourceResult, errMsg string) {
+func (r *KnowledgeBaseReconciler) finalizeIngestionRun(ctx context.Context, ns, name string, phase ragv1alpha1.IngestionRunPhase, chunks int, sources []ragv1alpha1.IngestSourceResult, errMsg string) {
 	var ir ragv1alpha1.IngestionRun
 	if e := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &ir); e != nil {
 		return // IngestionRun may not exist (legacy Jobs without IR)
@@ -160,13 +179,16 @@ func (r *KnowledgeBaseReconciler) pruneIngestionRuns(ctx context.Context, ns, kb
 func (r *KnowledgeBaseReconciler) startIngest(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, eff ragv1alpha1.ChunkingSpec, hash, secretsHash, reason string,
 ) (ctrl.Result, error) {
+	// A deferred cron ingest is now being honoured — clear the flag.
+	kb.Status.DeferCronIngest = false
+
 	// Incremental sync (per-source revision skip) is only safe when the *reason*
 	// is a freshness re-sync: the spec is unchanged, so a source skips iff its
 	// upstream revision is unchanged. Any spec change (sources, globs, chunking,
 	// model) or an initial run must fully re-process, because the revision marker
 	// alone cannot detect those.
 	mode := ragv1alpha1.IngestFull
-	if strings.HasPrefix(reason, "freshness") {
+	if strings.HasPrefix(reason, "freshness") || strings.HasPrefix(reason, "deferred") {
 		mode = kb.Spec.Ingestion.Mode
 		if mode == "" {
 			mode = ragv1alpha1.IngestIncremental
@@ -174,19 +196,57 @@ func (r *KnowledgeBaseReconciler) startIngest(
 	}
 
 	kb.Status.IngestRound++
-	job, specJSON, err := buildIngestJob(kb, hash, secretsHash, mode, eff)
+	job, specJSON, err := buildIngestJob(ctx, kb, hash, secretsHash, mode, eff)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if !specConfigMapSizeOK(specJSON) {
+		setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+			"SpecConfigTooLarge", "worker spec ConfigMap exceeds 1 MiB limit; reduce includeGlobs or web URLs, or split into multiple KnowledgeBases")
+		return ctrl.Result{}, r.statusUpdate(ctx, kb)
 	}
 	// Create spec ConfigMap first so the Job volume mount resolves.
 	cm := specConfigMap(kb.Namespace, specConfigMapName(job.Name), specJSON)
 	if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create ConfigMap: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating spec ConfigMap")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.prepareWorkerJob(ctx, kb, job.Name); err != nil {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create worker resources: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating worker identity/resources")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	if err := ctrl.SetControllerReference(kb, job, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.Create(ctx, job); err != nil {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create Job: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating worker Job")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		return ctrl.Result{}, ignoreAlreadyExists(err)
 	}
 
@@ -206,6 +266,16 @@ func (r *KnowledgeBaseReconciler) startIngest(
 	}
 	_ = ctrl.SetControllerReference(kb, ir, r.Scheme)
 	if err := r.Create(ctx, ir); err != nil {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create IngestionRun: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating IngestionRun")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		if !apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
 		}

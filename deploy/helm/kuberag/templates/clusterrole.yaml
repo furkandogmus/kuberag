@@ -1,8 +1,11 @@
 {{- if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: {{ if eq .Values.rbac.scope "namespace" }}Role{{ else }}ClusterRole{{ end }}
 metadata:
   name: {{ include "kuberag.fullname" . }}-role
+  {{- if eq .Values.rbac.scope "namespace" }}
+  namespace: {{ default .Release.Namespace .Values.rbac.watchNamespace }}
+  {{- end }}
   labels:
     {{- include "kuberag.labels" . | nindent 4 }}
 rules:
@@ -10,7 +13,21 @@ rules:
       - ""
     resources:
       - configmaps
+      - serviceaccounts
       - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - roles
+      - rolebindings
     verbs:
       - create
       - delete
@@ -48,9 +65,46 @@ rules:
       - update
       - watch
   - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
       - batch
     resources:
       - jobs
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - networkpolicies
     verbs:
       - create
       - delete
@@ -66,6 +120,8 @@ rules:
       - retrievers
       - vectorindices
       - ingestionruns
+      - backups
+      - restores
     verbs:
       - create
       - delete
@@ -78,6 +134,8 @@ rules:
       - rag.furkan.dev
     resources:
       - knowledgebases/finalizers
+      - backups/finalizers
+      - restores/finalizers
     verbs:
       - update
   - apiGroups:
@@ -87,6 +145,8 @@ rules:
       - retrievers/status
       - vectorindices/status
       - ingestionruns/status
+      - backups/status
+      - restores/status
     verbs:
       - get
       - patch

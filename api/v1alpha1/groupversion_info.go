@@ -26,6 +26,8 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&Retriever{}, &RetrieverList{},
 		&VectorIndex{}, &VectorIndexList{},
 		&IngestionRun{}, &IngestionRunList{},
+		&Backup{}, &BackupList{},
+		&Restore{}, &RestoreList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil

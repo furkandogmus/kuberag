@@ -5,23 +5,76 @@ Config comes entirely from env (set by the operator):
   EMBEDDING_MODEL, EMBEDDING_PROVIDER, EMBEDDING_BASE_URL, EMBEDDING_DIMENSION, EMBEDDING_API_KEY
   TOPK, SCORE_THRESHOLD, RERANK_ENABLED, RERANK_MODEL, RERANK_CANDIDATES
   HYBRID_DEFAULT, HYBRID_DENSE_PERCENT
+  RETRIEVER_AUTH_ENABLED, RETRIEVER_API_KEY
   GEN_ENABLED, GEN_PROVIDER, GEN_MODEL, GEN_BASE_URL, GEN_API_KEY, GEN_MAX_TOKENS, GEN_SYSTEM_PROMPT
 """
 from __future__ import annotations
 
+import secrets
 import os
+import threading
 import time
 
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Literal
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from rag_worker.chunking import chunk_text
 
 from rag_worker.embeddings import from_spec
 from rag_worker.stores import make_store
+
+try:
+    from opentelemetry import trace
+    _otel_tracer = trace.get_tracer(__name__)
+except ImportError:
+    class _NoopSpan:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def set_attribute(self, *a): pass
+    class _NoopTracer:
+        def start_as_current_span(self, *a, **kw): return _NoopSpan()
+    _otel_tracer = _NoopTracer()
+
+
+class _RequestBodyTooLarge(Exception):
+    pass
+
+
+class _RequestBodyLimitMiddleware:
+    """Streaming body limit that also covers chunked requests without Content-Length."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") == "/healthz":
+            await self.app(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > _MAX_REQUEST_BODY_BYTES:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _RequestBodyTooLarge:
+            response = JSONResponse(
+                status_code=413,
+                content={"detail": "request body too large"},
+            )
+            await response(scope, receive, send)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,6 +98,34 @@ _HYBRID_DEFAULT = os.environ.get("HYBRID_DEFAULT", "false").lower() == "true"
 # Dense (vector) weight in hybrid RRF fusion; lexical gets the remainder.
 _HYBRID_DENSE_W = int(os.environ.get("HYBRID_DENSE_PERCENT", "50") or 50) / 100.0
 _GEN_ENABLED = os.environ.get("GEN_ENABLED", "false").lower() == "true"
+_AUTH_ENABLED = os.environ.get("RETRIEVER_AUTH_ENABLED", "false").lower() == "true"
+_API_KEY = os.environ.get("RETRIEVER_API_KEY", "")
+_RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "false").lower() == "true"
+_RATE_LIMIT_RPM = max(1, int(os.environ.get("RATE_LIMIT_REQUESTS_PER_MINUTE", "60") or 60))
+_RATE_LIMIT_BURST = max(1, int(os.environ.get("RATE_LIMIT_BURST", "20") or 20))
+_MAX_CONCURRENT_REQUESTS = max(1, int(os.environ.get("MAX_CONCURRENT_REQUESTS", "32") or 32))
+_log_burst = 30
+_log_interval = 10.0
+_log_tokens = _log_burst
+_log_last = time.monotonic()
+
+
+def _rate_limited_log(msg: str) -> None:
+    """Rate-limited logging to avoid overloading kubelet/journald."""
+    global _log_tokens, _log_last
+    now = time.monotonic()
+    elapsed = now - _log_last
+    _log_tokens = min(_log_burst, _log_tokens + elapsed / _log_interval * _log_burst)
+    _log_last = now
+    if _log_tokens >= 1:
+        _log_tokens -= 1
+        print(f"[rag-retriever] {msg}", flush=True)
+
+_guard_lock = threading.Lock()
+_active_requests = 0
+_rate_buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
+_MAX_RATE_BUCKETS = 10000
+app.add_middleware(_RequestBodyLimitMiddleware)
 
 # OpenAI-compatible chat base URLs per provider.
 _GEN_BASE_URLS = {
@@ -57,6 +138,108 @@ _DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer the question using ONLY the provided "
     "context. If the context is insufficient, say so. Cite sources by their path."
 )
+
+
+def _request_api_key(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and token:
+        return token.strip()
+    return request.headers.get("x-api-key", "")
+
+
+def _client_id(request: Request) -> str:
+    # Do not trust X-Forwarded-For here: accepting it without a trusted-proxy
+    # configuration lets callers bypass rate limits by forging the header.
+    return request.client.host if request.client else "unknown"
+
+
+def _consume_rate_token(client_id: str, now: float) -> tuple[bool, int]:
+    refill_per_second = _RATE_LIMIT_RPM / 60.0
+    with _guard_lock:
+        if len(_rate_buckets) >= _MAX_RATE_BUCKETS and client_id not in _rate_buckets:
+            stale_before = now - 600
+            while _rate_buckets:
+                oldest_key = next(iter(_rate_buckets))
+                if _rate_buckets[oldest_key][1] >= stale_before:
+                    break
+                _rate_buckets.popitem(last=False)
+            if len(_rate_buckets) >= _MAX_RATE_BUCKETS:
+                # Bound memory even under a high-cardinality source-IP flood.
+                _rate_buckets.popitem(last=False)
+        tokens, updated_at = _rate_buckets.get(
+            client_id, (float(_RATE_LIMIT_BURST), now)
+        )
+        tokens = min(
+            float(_RATE_LIMIT_BURST),
+            tokens + max(0.0, now - updated_at) * refill_per_second,
+        )
+        if tokens < 1.0:
+            retry_after = max(1, int((1.0 - tokens) / refill_per_second) + 1)
+            _rate_buckets[client_id] = (tokens, now)
+            _rate_buckets.move_to_end(client_id)
+            return False, retry_after
+        _rate_buckets[client_id] = (tokens - 1.0, now)
+        _rate_buckets.move_to_end(client_id)
+        return True, 0
+
+
+@app.middleware("http")
+async def production_guards(request: Request, call_next):
+    global _active_requests
+
+    # Kubernetes probes must remain cheap and usable without credentials.
+    if request.url.path == "/healthz":
+        return await call_next(request)
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "request body too large"},
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "invalid Content-Length header"},
+            )
+
+    if _AUTH_ENABLED:
+        candidate = _request_api_key(request)
+        if not candidate or not secrets.compare_digest(candidate, _API_KEY):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "invalid or missing API key"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    if _RATE_LIMIT_ENABLED:
+        allowed, retry_after = _consume_rate_token(
+            _client_id(request), time.monotonic()
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "rate limit exceeded"},
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    with _guard_lock:
+        if _active_requests >= _MAX_CONCURRENT_REQUESTS:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "too many concurrent requests"},
+                headers={"Retry-After": "1"},
+            )
+        _active_requests += 1
+
+    try:
+        return await call_next(request)
+    finally:
+        with _guard_lock:
+            _active_requests -= 1
 
 
 def _spec_from_env() -> dict:
@@ -75,6 +258,7 @@ _embedder = None
 _store = None
 _reranker = None
 _gen_client = None
+_ensure_lock = threading.Lock()
 
 
 def _embedding_spec() -> dict:
@@ -90,24 +274,25 @@ def _embedding_spec() -> dict:
 
 def _ensure() -> None:
     global _embedder, _store, _reranker, _gen_client
-    if _embedder is None:
-        _embedder = from_spec(_embedding_spec())
-    if _store is None:
-        os.environ.setdefault("KB_NAME", os.environ.get("VECTORSTORE_COLLECTION", "kb"))
-        _store = make_store(_spec_from_env())
-    if _RERANK and _reranker is None:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
+    with _ensure_lock:
+        if _embedder is None:
+            _embedder = from_spec(_embedding_spec())
+        if _store is None:
+            os.environ.setdefault("KB_NAME", os.environ.get("VECTORSTORE_COLLECTION", "kb"))
+            _store = make_store(_spec_from_env())
+        if _RERANK and _reranker is None:
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-        model = os.environ.get("RERANK_MODEL") or "bge-reranker-base"
-        _reranker = TextCrossEncoder(model_name=model)
-    if _GEN_ENABLED and _gen_client is None:
-        from openai import OpenAI
+            model = os.environ.get("RERANK_MODEL") or "bge-reranker-base"
+            _reranker = TextCrossEncoder(model_name=model)
+        if _GEN_ENABLED and _gen_client is None:
+            from openai import OpenAI
 
-        provider = os.environ.get("GEN_PROVIDER", "openai")
-        base_url = os.environ.get("GEN_BASE_URL") or _GEN_BASE_URLS.get(provider)
-        if not base_url:
-            raise ValueError(f"generation provider {provider!r} requires GEN_BASE_URL")
-        _gen_client = OpenAI(base_url=base_url, api_key=os.environ.get("GEN_API_KEY") or "no-key")
+            provider = os.environ.get("GEN_PROVIDER", "openai")
+            base_url = os.environ.get("GEN_BASE_URL") or _GEN_BASE_URLS.get(provider)
+            if not base_url:
+                raise ValueError(f"generation provider {provider!r} requires GEN_BASE_URL")
+            _gen_client = OpenAI(base_url=base_url, api_key=os.environ.get("GEN_API_KEY") or "no-key")
 
 
 def _generate(
@@ -238,92 +423,95 @@ def healthz() -> dict:
 
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest) -> QueryResponse:
-    _ensure()
-    t0 = time.perf_counter()
-    topk = req.topK or _DEFAULT_TOPK
-    use_hybrid = req.hybrid if req.hybrid is not None else _HYBRID_DEFAULT
-    # Per-request overrides fall back to the server (spec) defaults.
-    dense_w = req.hybridDensePercent / 100.0 if req.hybridDensePercent is not None else _HYBRID_DENSE_W
-    threshold = req.scoreThresholdPercent / 100.0 if req.scoreThresholdPercent is not None else _SCORE_THRESHOLD
-    # Reranking can only be turned *off* per request (the model is loaded at
-    # startup); a request can't enable it on a Retriever that didn't opt in.
-    use_rerank = _RERANK and (req.rerank if req.rerank is not None else True)
+    with _otel_tracer.start_as_current_span("retriever.query") as span:
+        _ensure()
+        t0 = time.perf_counter()
+        topk = req.topK or _DEFAULT_TOPK
+        span.set_attribute("top_k", topk)
+        span.set_attribute("query.len", len(req.query))
+        use_hybrid = req.hybrid if req.hybrid is not None else _HYBRID_DEFAULT
+        # Per-request overrides fall back to the server (spec) defaults.
+        dense_w = req.hybridDensePercent / 100.0 if req.hybridDensePercent is not None else _HYBRID_DENSE_W
+        threshold = req.scoreThresholdPercent / 100.0 if req.scoreThresholdPercent is not None else _SCORE_THRESHOLD
+        # Reranking can only be turned *off* per request (the model is loaded at
+        # startup); a request can't enable it on a Retriever that didn't opt in.
+        use_rerank = _RERANK and (req.rerank if req.rerank is not None else True)
 
-    if use_rerank:
-        # Give the reranker a deeper candidate pool, then return the top `topk`.
-        fetch_k = _RERANK_CANDIDATES if _RERANK_CANDIDATES > 0 else max(topk * 4, 20)
-    elif use_hybrid:
-        fetch_k = max(topk * 3, 20)
-    else:
-        fetch_k = topk
-    fetch_k = max(fetch_k, topk)
+        if use_rerank:
+            # Give the reranker a deeper candidate pool, then return the top `topk`.
+            fetch_k = _RERANK_CANDIDATES if _RERANK_CANDIDATES > 0 else max(topk * 4, 20)
+        elif use_hybrid:
+            fetch_k = max(topk * 3, 20)
+        else:
+            fetch_k = topk
+        fetch_k = max(fetch_k, topk)
 
-    if use_hybrid:
-        qv = _embedder.embed_query(req.query)
-        vector_hits = _store.search(
-            qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
-        )
-        text_hits = _store.search_text(
-            req.query, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
-        )
-        hits = rrf(
-            vector_hits, text_hits,
-            dense_weight=dense_w, text_weight=1.0 - dense_w,
-        )
-    else:
-        qv = _embedder.embed_query(req.query)
-        hits = _store.search(
-            qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
-        )
-
-    reranked = bool(use_rerank and hits)
-    if reranked:
-        scores = list(_reranker.rerank(req.query, [h["payload"].get("text", "") for h in hits]))
-        for h, s in zip(hits, scores):
-            h["score"] = float(s)
-        hits.sort(key=lambda h: h["score"], reverse=True)
-
-    results = []
-    for h in hits[:topk]:
-        # RRF fusion scores are rank-derived, not similarities, so the similarity
-        # threshold only applies to raw vector/rerank scores.
-        is_rrf_score = use_hybrid and not use_rerank
-        if not is_rrf_score and h["score"] < threshold:
-            continue
-        p = h["payload"]
-        results.append(Chunk(
-            text=p.get("text", ""),
-            source=p.get("source", ""),
-            docPath=p.get("doc_path", ""),
-            score=round(float(h["score"]), 4),
-        ))
-
-    meta = QueryMeta(
-        topK=topk,
-        hybrid=use_hybrid,
-        hybridDensePercent=round(dense_w * 100) if use_hybrid else None,
-        scoreThresholdPercent=round(threshold * 100),
-        reranked=reranked,
-        candidates=fetch_k,
-        returned=len(results),
-        tookMillis=round((time.perf_counter() - t0) * 1000),
-    )
-
-    answer = None
-    genErr = None
-    if _GEN_ENABLED and results:
-        try:
-            answer = _generate(
-                req.query,
-                results,
-                req.history,
-                temperature=req.temperature,
-                system_prompt=req.systemPrompt,
-                max_tokens=req.maxTokens,
+        if use_hybrid:
+            qv = _embedder.embed_query(req.query)
+            vector_hits = _store.search(
+                qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
             )
-        except Exception as e:
-            genErr = f"{type(e).__name__}: {e}"
-    return QueryResponse(query=req.query, results=results, answer=answer, generationError=genErr, meta=meta)
+            text_hits = _store.search_text(
+                req.query, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
+            )
+            hits = rrf(
+                vector_hits, text_hits,
+                dense_weight=dense_w, text_weight=1.0 - dense_w,
+            )
+        else:
+            qv = _embedder.embed_query(req.query)
+            hits = _store.search(
+                qv, fetch_k, source=req.source, doc_path=req.docPath, doc_path_prefix=req.docPathPrefix
+            )
+
+        reranked = bool(use_rerank and hits)
+        if reranked:
+            scores = list(_reranker.rerank(req.query, [h["payload"].get("text", "") for h in hits]))
+            for h, s in zip(hits, scores):
+                h["score"] = float(s)
+            hits.sort(key=lambda h: h["score"], reverse=True)
+
+        results = []
+        for h in hits[:topk]:
+            # RRF fusion scores are rank-derived, not similarities, so the similarity
+            # threshold only applies to raw vector/rerank scores.
+            is_rrf_score = use_hybrid and not use_rerank
+            if not is_rrf_score and h["score"] < threshold:
+                continue
+            p = h["payload"]
+            results.append(Chunk(
+                text=p.get("text", ""),
+                source=p.get("source", ""),
+                docPath=p.get("doc_path", ""),
+                score=round(float(h["score"]), 4),
+            ))
+
+        meta = QueryMeta(
+            topK=topk,
+            hybrid=use_hybrid,
+            hybridDensePercent=round(dense_w * 100) if use_hybrid else None,
+            scoreThresholdPercent=round(threshold * 100),
+            reranked=reranked,
+            candidates=fetch_k,
+            returned=len(results),
+            tookMillis=round((time.perf_counter() - t0) * 1000),
+        )
+
+        answer = None
+        genErr = None
+        if _GEN_ENABLED and results:
+            try:
+                answer = _generate(
+                    req.query,
+                    results,
+                    req.history,
+                    temperature=req.temperature,
+                    system_prompt=req.systemPrompt,
+                    max_tokens=req.maxTokens,
+                )
+            except Exception as e:
+                genErr = f"{type(e).__name__}: {e}"
+        return QueryResponse(query=req.query, results=results, answer=answer, generationError=genErr, meta=meta)
 
 
 # Ingest endpoints (Dev/Playground mode)
@@ -417,4 +605,3 @@ def ingest_url(req: UrlIngestRequest) -> dict:
         })
     _store.upsert(points)
     return {"status": "ok", "message": f"Successfully ingested {len(points)} chunks from URL {req.url}", "chunks": len(points), "url": req.url}
-

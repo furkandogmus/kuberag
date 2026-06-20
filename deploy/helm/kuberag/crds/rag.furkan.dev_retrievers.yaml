@@ -966,6 +966,52 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
+              apiKeySecretRef:
+                description: |-
+                  APIKeySecretRef enables API-key authentication for the retriever. The
+                  referenced Secret value is accepted as either an Authorization Bearer
+                  token or an X-API-Key header. Health probes remain unauthenticated.
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              autoscaling:
+                description: Autoscaling optionally creates a CPU-based HPA.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled creates and manages an HPA for the Retriever
+                      Deployment.
+                    type: boolean
+                  maxReplicas:
+                    default: 10
+                    description: MaxReplicas is the upper replica bound.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    default: 2
+                    description: MinReplicas is the lower replica bound.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  targetCPUUtilizationPercentage:
+                    default: 70
+                    description: TargetCPUUtilizationPercentage is the average CPU
+                      utilization target.
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: maxReplicas must be greater than or equal to minReplicas
+                  rule: self.maxReplicas >= self.minReplicas
               generation:
                 description: Generation, when set, enables LLM answer synthesis over
                   retrieved chunks.
@@ -1043,6 +1089,39 @@ spec:
               image:
                 description: Image overrides the retriever server image.
                 type: string
+              ingress:
+                description: Ingress optionally exposes the Retriever outside the
+                  cluster.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations are copied to the managed Ingress.
+                    type: object
+                  className:
+                    description: ClassName selects the Ingress controller.
+                    type: string
+                  clusterIssuer:
+                    description: ClusterIssuer adds the cert-manager.io/cluster-issuer
+                      annotation.
+                    type: string
+                  host:
+                    description: Host is the public DNS name routed to the Retriever.
+                    minLength: 1
+                    type: string
+                  path:
+                    default: /
+                    description: Path is the URL path prefix.
+                    pattern: ^/
+                    type: string
+                  tlsSecretName:
+                    description: |-
+                      TLSSecretName enables TLS using this Secret. The Secret may be provisioned
+                      by cert-manager when ClusterIssuer is set.
+                    type: string
+                required:
+                - host
+                type: object
               knowledgeBaseRef:
                 description: KnowledgeBaseRef names the KnowledgeBase to serve from
                   (same namespace).
@@ -1052,11 +1131,124 @@ spec:
                 required:
                 - name
                 type: object
+              maxConcurrentRequests:
+                default: 32
+                description: |-
+                  MaxConcurrentRequests caps in-flight non-health requests per pod. Excess
+                  requests receive 503 with Retry-After instead of exhausting the process.
+                maximum: 10000
+                minimum: 1
+                type: integer
+              maxRequestBodyBytes:
+                default: 1048576
+                description: MaxRequestBodyBytes rejects oversized request bodies
+                  before parsing.
+                format: int64
+                maximum: 104857600
+                minimum: 1024
+                type: integer
               nodeSelector:
                 additionalProperties:
                   type: string
                 description: NodeSelector is a selector which must be true for the
                   pod to fit on a node.
+                type: object
+              oidc:
+                description: |-
+                  OIDC enables an oauth2-proxy sidecar. Ingress is required and native
+                  apiKeySecretRef authentication must not be enabled at the same time.
+                properties:
+                  clientIDSecretRef:
+                    description: ClientIDSecretRef contains the OIDC client ID.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  clientSecretSecretRef:
+                    description: ClientSecretSecretRef contains the OIDC client secret.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  cookieSecretRef:
+                    description: |-
+                      CookieSecretRef contains an oauth2-proxy cookie secret. Use 16, 24, or 32
+                      random bytes encoded as base64url.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  emailDomains:
+                    description: EmailDomains restricts login to these domains. Empty
+                      defaults to "*".
+                    items:
+                      type: string
+                    type: array
+                  groups:
+                    description: Groups restricts login to users with at least one
+                      matching OIDC group.
+                    items:
+                      type: string
+                    type: array
+                  image:
+                    default: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+                    description: Image overrides the oauth2-proxy image.
+                    type: string
+                  issuerURL:
+                    description: IssuerURL is the OpenID Connect issuer discovery
+                      URL.
+                    pattern: ^https://
+                    type: string
+                required:
+                - clientIDSecretRef
+                - clientSecretSecretRef
+                - cookieSecretRef
+                - issuerURL
+                type: object
+              podDisruptionBudget:
+                description: |-
+                  PodDisruptionBudget controls whether the operator maintains a PDB for this
+                  Retriever. Enabled by default when replicas is greater than one.
+                type: boolean
+              rateLimit:
+                description: RateLimit enables per-client request throttling. Omit
+                  to disable.
+                properties:
+                  burst:
+                    default: 20
+                    description: Burst is the maximum number of immediately available
+                      request tokens.
+                    maximum: 10000
+                    minimum: 1
+                    type: integer
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled turns rate limiting on. When disabled, RequestsPerMinute and Burst
+                      are ignored.
+                    type: boolean
+                  requestsPerMinute:
+                    default: 60
+                    description: RequestsPerMinute is the sustained request rate allowed
+                      per client IP.
+                    maximum: 100000
+                    minimum: 1
+                    type: integer
                 type: object
               replicas:
                 default: 1
@@ -1200,6 +1392,11 @@ spec:
             required:
             - knowledgeBaseRef
             type: object
+            x-kubernetes-validations:
+            - message: ingress is required when oidc is configured
+              rule: '!has(self.oidc) || has(self.ingress)'
+            - message: oidc and apiKeySecretRef cannot be enabled together
+              rule: '!(has(self.oidc) && has(self.apiKeySecretRef))'
           status:
             description: RetrieverStatus is the observed serving state.
             properties:
@@ -1267,6 +1464,9 @@ spec:
                 - Pending
                 - Available
                 - Progressing
+                type: string
+              publicEndpoint:
+                description: PublicEndpoint is the managed Ingress URL, when configured.
                 type: string
               readyReplicas:
                 format: int32

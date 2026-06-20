@@ -1,13 +1,23 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -26,6 +36,31 @@ func init() {
 	utilruntime.Must(ragv1alpha1.AddToScheme(scheme))
 }
 
+func initTracer() (*sdktrace.TracerProvider, error) {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		return nil, nil
+	}
+	ctx := context.Background()
+	exporter, err := otlptracegrpc.New(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("creating OTLP exporter: %w", err)
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			"https://opentelemetry.io/schemas/1.26.0",
+			attribute.String("service.name", "kuberag"),
+			attribute.String("service.version", "0.1.0"),
+		)),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{},
+	))
+	return tp, nil
+}
+
 func main() {
 	var metricsAddr string
 	var probeAddr string
@@ -40,13 +75,32 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	tp, err := initTracer()
+	if err != nil {
+		setupLog.Error(err, "unable to initialise OTel tracer")
+		os.Exit(1)
+	}
+	if tp != nil {
+		defer func() { _ = tp.Shutdown(context.Background()) }()
+	}
+
+	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr, SecureServing: false},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "kuberag.furkan.dev",
-	})
+	}
+	if raw := strings.TrimSpace(os.Getenv("WATCH_NAMESPACE")); raw != "" {
+		managerOptions.Cache.DefaultNamespaces = parseWatchNamespaces(raw)
+		if len(managerOptions.Cache.DefaultNamespaces) == 0 {
+			setupLog.Error(fmt.Errorf("no valid namespaces"), "WATCH_NAMESPACE did not contain a valid namespace")
+			os.Exit(1)
+		}
+		setupLog.Info("restricting cache to namespaces", "namespaces", raw)
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -77,6 +131,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.BackupReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Backup")
+		os.Exit(1)
+	}
+
+	if err := (&controller.RestoreReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Restore")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
@@ -91,4 +161,15 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func parseWatchNamespaces(raw string) map[string]cache.Config {
+	namespaces := map[string]cache.Config{}
+	for _, namespace := range strings.Split(raw, ",") {
+		namespace = strings.TrimSpace(namespace)
+		if namespace != "" {
+			namespaces[namespace] = cache.Config{}
+		}
+	}
+	return namespaces
 }

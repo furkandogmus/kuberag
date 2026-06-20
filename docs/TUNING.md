@@ -147,6 +147,11 @@ freshness:
 `ingestion` also carries pod-placement knobs (`resources`, `serviceAccountName`,
 `nodeSelector`, `tolerations`, `affinity`) — see API.md.
 
+When `serviceAccountName` is omitted, the operator creates a dedicated
+`<knowledgebase>-worker` ServiceAccount and narrowly scoped RBAC for each Job.
+Set it only for an externally managed identity such as IRSA; the referenced
+ServiceAccount must already exist.
+
 ---
 
 ## Retrieval quality & auto-tune
@@ -226,6 +231,13 @@ A `Retriever` is a Deployment+Service over a KnowledgeBase. Query-shaping fields
 | `rerank.enabled` / `rerank.model` | `false` / `bge-reranker-base` | Cross-encoder re-ranks candidates for precision at extra latency. |
 | `rerank.candidatePoolSize` | `0` (auto) | How many candidates to fetch *before* reranking; the reranker returns the top `topK`. Bigger pool → better quality, more latency. `0` = `max(4×topK, 20)`. |
 | `replicas` | `1` | Server replicas (scale subresource enabled). |
+| `rateLimit.requestsPerMinute` / `burst` | disabled | Per-client, per-pod token bucket. Enables 429 responses before expensive retrieval/generation work. |
+| `maxConcurrentRequests` | `32` | Per-pod in-flight request cap; excess receives 503. |
+| `maxRequestBodyBytes` | `1048576` | Streaming request-body limit; excess receives 413. |
+| `podDisruptionBudget` | auto | Defaults on when the minimum replica count is greater than one. |
+| `autoscaling.*` | disabled | CPU HPA bounds and utilization target. When enabled, `minReplicas` is the availability target. |
+| `ingress.*` | disabled | Managed public host/path, Ingress class, TLS Secret, and optional cert-manager ClusterIssuer. |
+| `oidc.*` | disabled | oauth2-proxy sidecar with Secret-backed OIDC client and cookie credentials. Requires Ingress. |
 
 **Hybrid: spec default vs per-request.** `spec.hybrid` sets the default for the
 endpoint; an individual `/query` can always override it with its own `hybrid`
@@ -257,6 +269,27 @@ spec:
   rerank:
     enabled: true
     candidatePoolSize: 50     # rerank 50 candidates, return top 8
+  rateLimit:
+    enabled: true
+    requestsPerMinute: 120
+    burst: 30
+  maxConcurrentRequests: 32
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  ingress:
+    host: rag.example.com
+    className: nginx
+    tlsSecretName: rag-example-tls
+    clusterIssuer: letsencrypt-prod
+  oidc:
+    issuerURL: https://id.example.com/realms/company
+    clientIDSecretRef: { name: retriever-oidc, key: clientID }
+    clientSecretSecretRef: { name: retriever-oidc, key: clientSecret }
+    cookieSecretRef: { name: retriever-oidc, key: cookieSecret }
+    emailDomains: [example.com]
 ```
 
 ---

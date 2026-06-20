@@ -42,6 +42,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             {{- toYaml .Values.args | nindent 12 }}
+          {{- if eq .Values.rbac.scope "namespace" }}
+          env:
+            - name: WATCH_NAMESPACE
+              value: {{ default .Release.Namespace .Values.rbac.watchNamespace | quote }}
+          {{- end }}
           ports:
             - containerPort: 8080
               name: metrics

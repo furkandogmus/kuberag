@@ -18,18 +18,56 @@ func (r *KnowledgeBaseReconciler) startEval(
 	ctx context.Context, kb *ragv1alpha1.KnowledgeBase, eff ragv1alpha1.ChunkingSpec, hash, secretsHash string,
 ) (ctrl.Result, error) {
 	kb.Status.EvalRound++
-	job, specJSON, err := buildEvalJob(kb, hash, secretsHash, kb.Status.EvalRound, eff)
+	job, specJSON, err := buildEvalJob(ctx, kb, hash, secretsHash, kb.Status.EvalRound, eff)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if !specConfigMapSizeOK(specJSON) {
+		setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+			"SpecConfigTooLarge", "worker spec ConfigMap exceeds 1 MiB limit; reduce includeGlobs or web URLs, or split into multiple KnowledgeBases")
+		return ctrl.Result{}, r.statusUpdate(ctx, kb)
+	}
 	cm := specConfigMap(kb.Namespace, specConfigMapName(job.Name), specJSON)
 	if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create ConfigMap: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating spec ConfigMap")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.prepareWorkerJob(ctx, kb, job.Name, kb.Spec.RetrievalQuality.DatasetRef.Name); err != nil {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create worker resources: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating worker identity/resources")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	if err := ctrl.SetControllerReference(kb, job, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.Create(ctx, job); err != nil {
+		if isQuotaExceeded(err) {
+			setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create Job: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating worker Job")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		return ctrl.Result{}, ignoreAlreadyExists(err)
 	}
 	kb.Status.ActiveJob = job.Name
@@ -50,6 +88,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	kb.Status.ActiveJobStartedAt = nil
 
 	if jobFailed(job) {
+		r.clearWorkerConfigMapAccess(ctx, kb)
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "EvalFailed", "evaluation job failed")
 		r.event(kb, corev1.EventTypeWarning, "EvalFailed", "evaluation job %s failed", job.Name)
 		if err := r.statusUpdate(ctx, kb); err != nil {
@@ -64,6 +103,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	if err := r.readResult(ctx, kb.Namespace, job.Name, &result); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
 	}
+	r.clearWorkerConfigMapAccess(ctx, kb)
 
 	now := metav1.Now()
 	kb.Status.Evaluation = &ragv1alpha1.EvaluationStatus{
@@ -72,7 +112,7 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		Queries:          result.Queries,
 		Time:             &now,
 	}
-	retrievalRecall.WithLabelValues(kb.Name).Set(float64(result.RecallPercent))
+	retrievalRecall.WithLabelValues(kb.Namespace).Set(float64(result.RecallPercent))
 
 	// No queries means the dataset is empty/missing: recall 0% is meaningless, so
 	// don't gate, auto-tune, or degrade on it. Evaluation is still recorded (with a
@@ -100,8 +140,8 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 		kb.Status.AutoTuneAttempts = 0
 		kb.Status.BestChunking = nil
 		kb.Status.BestRecallPercent = 0
-		autoTuneAttempts.WithLabelValues(kb.Name).Set(0)
-		autoTuneBestRecall.WithLabelValues(kb.Name).Set(float64(result.RecallPercent))
+		autoTuneAttempts.WithLabelValues(kb.Namespace).Set(0)
+		autoTuneBestRecall.WithLabelValues(kb.Namespace).Set(float64(result.RecallPercent))
 		setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionTrue, "RecallMet",
 			fmt.Sprintf("recall %d%% >= target %d%%", result.RecallPercent, target))
 		r.event(kb, corev1.EventTypeNormal, "RecallMet", "recall %d%% meets target %d%%", result.RecallPercent, target)
@@ -116,12 +156,12 @@ func (r *KnowledgeBaseReconciler) finalizeEval(
 	// Below target. Remember the best config we've seen before stepping further,
 	// so auto-tune can land on it later even if subsequent steps regress.
 	recordBest(kb, result.RecallPercent)
-	autoTuneBestRecall.WithLabelValues(kb.Name).Set(float64(kb.Status.BestRecallPercent))
+	autoTuneBestRecall.WithLabelValues(kb.Namespace).Set(float64(kb.Status.BestRecallPercent))
 
 	if autoTuneEnabled(rq) {
 		if kb.Status.AutoTuneAttempts < autoTuneMax(rq) {
 			applyAutoTune(kb)
-			autoTuneAttempts.WithLabelValues(kb.Name).Set(float64(kb.Status.AutoTuneAttempts))
+			autoTuneAttempts.WithLabelValues(kb.Namespace).Set(float64(kb.Status.AutoTuneAttempts))
 			setCondition(kb, ragv1alpha1.ConditionEvaluated, metav1.ConditionFalse, "AutoTuning",
 				fmt.Sprintf("recall %d%% < target %d%%; tuning chunking (attempt %d)",
 					result.RecallPercent, target, kb.Status.AutoTuneAttempts))

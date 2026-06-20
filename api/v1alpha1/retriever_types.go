@@ -24,6 +24,101 @@ type RerankSpec struct {
 	CandidatePoolSize int `json:"candidatePoolSize,omitempty"`
 }
 
+// RateLimitSpec configures a per-client token-bucket limiter for the Retriever.
+type RateLimitSpec struct {
+	// Enabled turns rate limiting on. When disabled, RequestsPerMinute and Burst
+	// are ignored.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// RequestsPerMinute is the sustained request rate allowed per client IP.
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100000
+	// +optional
+	RequestsPerMinute int `json:"requestsPerMinute,omitempty"`
+	// Burst is the maximum number of immediately available request tokens.
+	// +kubebuilder:default=20
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	// +optional
+	Burst int `json:"burst,omitempty"`
+}
+
+// AutoscalingSpec configures a CPU-based HorizontalPodAutoscaler.
+// +kubebuilder:validation:XValidation:rule="self.maxReplicas >= self.minReplicas",message="maxReplicas must be greater than or equal to minReplicas"
+type AutoscalingSpec struct {
+	// Enabled creates and manages an HPA for the Retriever Deployment.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// MinReplicas is the lower replica bound.
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinReplicas int32 `json:"minReplicas,omitempty"`
+	// MaxReplicas is the upper replica bound.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+	// TargetCPUUtilizationPercentage is the average CPU utilization target.
+	// +kubebuilder:default=70
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	TargetCPUUtilizationPercentage int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+}
+
+// RetrieverIngressSpec exposes a Retriever through a Kubernetes Ingress.
+type RetrieverIngressSpec struct {
+	// Host is the public DNS name routed to the Retriever.
+	// +kubebuilder:validation:MinLength=1
+	Host string `json:"host"`
+	// ClassName selects the Ingress controller.
+	// +optional
+	ClassName string `json:"className,omitempty"`
+	// Path is the URL path prefix.
+	// +kubebuilder:default="/"
+	// +kubebuilder:validation:Pattern=`^/`
+	// +optional
+	Path string `json:"path,omitempty"`
+	// Annotations are copied to the managed Ingress.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// TLSSecretName enables TLS using this Secret. The Secret may be provisioned
+	// by cert-manager when ClusterIssuer is set.
+	// +optional
+	TLSSecretName string `json:"tlsSecretName,omitempty"`
+	// ClusterIssuer adds the cert-manager.io/cluster-issuer annotation.
+	// +optional
+	ClusterIssuer string `json:"clusterIssuer,omitempty"`
+}
+
+// OIDCSpec configures an oauth2-proxy sidecar in front of the Retriever.
+type OIDCSpec struct {
+	// IssuerURL is the OpenID Connect issuer discovery URL.
+	// +kubebuilder:validation:Pattern=`^https://`
+	IssuerURL string `json:"issuerURL"`
+	// ClientIDSecretRef contains the OIDC client ID.
+	ClientIDSecretRef SecretKeyRef `json:"clientIDSecretRef"`
+	// ClientSecretSecretRef contains the OIDC client secret.
+	ClientSecretSecretRef SecretKeyRef `json:"clientSecretSecretRef"`
+	// CookieSecretRef contains an oauth2-proxy cookie secret. Use 16, 24, or 32
+	// random bytes encoded as base64url.
+	CookieSecretRef SecretKeyRef `json:"cookieSecretRef"`
+	// EmailDomains restricts login to these domains. Empty defaults to "*".
+	// +optional
+	EmailDomains []string `json:"emailDomains,omitempty"`
+	// Groups restricts login to users with at least one matching OIDC group.
+	// +optional
+	Groups []string `json:"groups,omitempty"`
+	// Image overrides the oauth2-proxy image.
+	// +kubebuilder:default="quay.io/oauth2-proxy/oauth2-proxy:v7.15.3"
+	// +optional
+	Image string `json:"image,omitempty"`
+}
+
 // GenerationSpec turns the retriever into a full RAG endpoint: after retrieval
 // it asks an LLM to synthesize an answer grounded in the retrieved chunks.
 // +kubebuilder:validation:XValidation:rule="self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)",message="baseURL is required when provider is openai-compatible"
@@ -56,9 +151,46 @@ type GenerationSpec struct {
 }
 
 // RetrieverSpec declares a serving endpoint over a KnowledgeBase.
+// +kubebuilder:validation:XValidation:rule="!has(self.oidc) || has(self.ingress)",message="ingress is required when oidc is configured"
+// +kubebuilder:validation:XValidation:rule="!(has(self.oidc) && has(self.apiKeySecretRef))",message="oidc and apiKeySecretRef cannot be enabled together"
 type RetrieverSpec struct {
 	// KnowledgeBaseRef names the KnowledgeBase to serve from (same namespace).
 	KnowledgeBaseRef LocalObjectRef `json:"knowledgeBaseRef"`
+	// APIKeySecretRef enables API-key authentication for the retriever. The
+	// referenced Secret value is accepted as either an Authorization Bearer
+	// token or an X-API-Key header. Health probes remain unauthenticated.
+	// +optional
+	APIKeySecretRef *SecretKeyRef `json:"apiKeySecretRef,omitempty"`
+	// RateLimit enables per-client request throttling. Omit to disable.
+	// +optional
+	RateLimit *RateLimitSpec `json:"rateLimit,omitempty"`
+	// MaxConcurrentRequests caps in-flight non-health requests per pod. Excess
+	// requests receive 503 with Retry-After instead of exhausting the process.
+	// +kubebuilder:default=32
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	// +optional
+	MaxConcurrentRequests int `json:"maxConcurrentRequests,omitempty"`
+	// MaxRequestBodyBytes rejects oversized request bodies before parsing.
+	// +kubebuilder:default=1048576
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=104857600
+	// +optional
+	MaxRequestBodyBytes int64 `json:"maxRequestBodyBytes,omitempty"`
+	// PodDisruptionBudget controls whether the operator maintains a PDB for this
+	// Retriever. Enabled by default when replicas is greater than one.
+	// +optional
+	PodDisruptionBudget *bool `json:"podDisruptionBudget,omitempty"`
+	// Autoscaling optionally creates a CPU-based HPA.
+	// +optional
+	Autoscaling *AutoscalingSpec `json:"autoscaling,omitempty"`
+	// Ingress optionally exposes the Retriever outside the cluster.
+	// +optional
+	Ingress *RetrieverIngressSpec `json:"ingress,omitempty"`
+	// OIDC enables an oauth2-proxy sidecar. Ingress is required and native
+	// apiKeySecretRef authentication must not be enabled at the same time.
+	// +optional
+	OIDC *OIDCSpec `json:"oidc,omitempty"`
 	// Generation, when set, enables LLM answer synthesis over retrieved chunks.
 	// +optional
 	Generation *GenerationSpec `json:"generation,omitempty"`
@@ -123,6 +255,9 @@ type RetrieverStatus struct {
 	// ServiceEndpoint is the in-cluster URL of the retriever, when available.
 	// +optional
 	ServiceEndpoint string `json:"serviceEndpoint,omitempty"`
+	// PublicEndpoint is the managed Ingress URL, when configured.
+	// +optional
+	PublicEndpoint string `json:"publicEndpoint,omitempty"`
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 	// +optional

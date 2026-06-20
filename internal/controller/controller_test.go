@@ -103,7 +103,7 @@ func TestCorpusHashStableAndSensitive(t *testing.T) {
 func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 	kb := baseKB()
 	jobEff := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 500, Overlap: 50}
-	job, _, err := buildIngestJob(kb, "oldhash", "oldsecrets", ragv1alpha1.IngestFull, jobEff)
+	job, _, err := buildIngestJob(context.Background(), kb, "oldhash", "oldsecrets", ragv1alpha1.IngestFull, jobEff)
 	if err != nil {
 		t.Fatalf("buildIngestJob returned error: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 func TestActiveIngestStalenessUsesJobHash(t *testing.T) {
 	kb := baseKB()
 	currentHash := corpusHash(kb)
-	job, _, err := buildIngestJob(kb, currentHash, "s1", ragv1alpha1.IngestFull, effectiveChunking(kb))
+	job, _, err := buildIngestJob(context.Background(), kb, currentHash, "s1", ragv1alpha1.IngestFull, effectiveChunking(kb))
 	if err != nil {
 		t.Fatalf("buildIngestJob returned error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestActiveIngestStalenessUsesJobHash(t *testing.T) {
 	}
 
 	// Changing secrets should also mark the job as stale.
-	job2, _, err := buildIngestJob(kb, currentHash, "s2", ragv1alpha1.IngestFull, effectiveChunking(kb))
+	job2, _, err := buildIngestJob(context.Background(), kb, currentHash, "s2", ragv1alpha1.IngestFull, effectiveChunking(kb))
 	if err != nil {
 		t.Fatalf("buildIngestJob returned error: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestAutoTuneHelpers(t *testing.T) {
 func TestSecurityContextHardening(t *testing.T) {
 	kb := baseKB()
 	// Test baseJob security context and volumes
-	job, err := baseJob(kb, "test-job", "ingest", "hash123", "secrets1", "test-job-spec", []string{"ingest"}, nil)
+	job, err := baseJob(context.Background(), kb, "test-job", "ingest", "hash123", "secrets1", "test-job-spec", []string{"ingest"}, nil)
 	if err != nil {
 		t.Fatalf("baseJob returned error: %v", err)
 	}
@@ -706,7 +706,7 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 		{Key: "cpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	}
 
-	job, err := baseJob(kb, "test-job", "ingest", "hash123", "secrets1", "test-job-spec", []string{"ingest"}, nil)
+	job, err := baseJob(context.Background(), kb, "test-job", "ingest", "hash123", "secrets1", "test-job-spec", []string{"ingest"}, nil)
 	if err != nil {
 		t.Fatalf("baseJob returned error: %v", err)
 	}
@@ -734,8 +734,12 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gen-secret", Namespace: "default"},
 		Data:       map[string][]byte{"apiKey": []byte("gen-pass")},
 	}
+	secret3 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "retriever-secret", Namespace: "default"},
+		Data:       map[string][]byte{"apiKey": []byte("retriever-pass")},
+	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1, secret2).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1, secret2, secret3).Build()
 	r.Client = fakeClient
 
 	kb.Spec.VectorStore.CredentialsSecretRef = &ragv1alpha1.SecretKeyRef{
@@ -751,12 +755,39 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 			Key:  "apiKey",
 		},
 	}
+	rt.Spec.APIKeySecretRef = &ragv1alpha1.SecretKeyRef{
+		Name: "retriever-secret",
+		Key:  "apiKey",
+	}
+
+	authDep := r.desiredDeployment(rt, kb, "auth-hash")
+	var authEnv *corev1.EnvVar
+	var authEnabled bool
+	for i := range authDep.Spec.Template.Spec.Containers[0].Env {
+		env := &authDep.Spec.Template.Spec.Containers[0].Env[i]
+		if env.Name == "RETRIEVER_AUTH_ENABLED" && env.Value == "true" {
+			authEnabled = true
+		}
+		if env.Name == "RETRIEVER_API_KEY" {
+			authEnv = env
+			break
+		}
+	}
+	if !authEnabled {
+		t.Error("expected RETRIEVER_AUTH_ENABLED=true when an API key Secret is configured")
+	}
+	if authEnv == nil || authEnv.ValueFrom == nil || authEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("expected RETRIEVER_API_KEY to come from a Secret")
+	}
+	if authEnv.ValueFrom.SecretKeyRef.Name != "retriever-secret" || authEnv.ValueFrom.SecretKeyRef.Key != "apiKey" {
+		t.Errorf("unexpected retriever auth secret ref: %#v", authEnv.ValueFrom.SecretKeyRef)
+	}
 
 	hash1 := r.computeSecretsHash(context.Background(), rt, kb)
 
-	// Change secret value and verify hash changes
-	secret1.Data["apiKey"] = []byte("vector-pass-new")
-	fakeClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1, secret2).Build()
+	// Change the retriever auth secret and verify the rollout hash changes.
+	secret3.Data["apiKey"] = []byte("retriever-pass-new")
+	fakeClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1, secret2, secret3).Build()
 	r.Client = fakeClient
 
 	hash2 := r.computeSecretsHash(context.Background(), rt, kb)
@@ -810,7 +841,7 @@ func TestInvalidIngestionResourcesReturnError(t *testing.T) {
 	kb := baseKB()
 	kb.Spec.Ingestion.Resources = &ragv1alpha1.ResourceRequirements{CPU: "not-a-quantity"}
 
-	if _, _, err := buildIngestJob(kb, "hash123", "secrets1", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
+	if _, _, err := buildIngestJob(context.Background(), kb, "hash123", "secrets1", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
 		t.Fatal("expected invalid ingestion resources to return an error")
 	}
 }

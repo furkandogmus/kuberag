@@ -7,34 +7,44 @@ from pathlib import Path
 
 from . import sources
 from .chunking import chunk_text
-from .common import chunk_hash, load_spec, log, point_id, prior_sources, write_result
+from .common import chunk_hash, load_spec, log, point_id, prior_sources, read_checkpoint, tracer, write_checkpoint, write_result
 from .embeddings import Embedder, from_spec
 from .stores import make_store
 
 
 def run() -> None:
-    spec = load_spec()
-    mode = os.environ.get("INGEST_MODE", "incremental")
-    chunking = spec.get("chunking", {})
-    strategy = chunking.get("strategy", "semantic")
-    max_tokens = chunking.get("maxTokens", 800)
-    overlap = chunking.get("overlap", 80)
-    ingestion_cfg = spec.get("ingestion", {})
-    batch_size = int(ingestion_cfg.get("batchSize", 0) or 64)
+    with tracer.start_as_current_span("ingest.run") as span:
+        spec = load_spec()
+        mode = os.environ.get("INGEST_MODE", "incremental")
+        span.set_attribute("kb.name", os.environ.get("KB_NAME", ""))
+        span.set_attribute("ingest.mode", mode)
+        chunking = spec.get("chunking", {})
+        strategy = chunking.get("strategy", "semantic")
+        max_tokens = chunking.get("maxTokens", 800)
+        overlap = chunking.get("overlap", 80)
+        ingestion_cfg = spec.get("ingestion", {})
+        batch_size = int(ingestion_cfg.get("batchSize", 0) or 64)
 
-    embedder = from_spec(spec["embedding"])
-    distance = spec["vectorStore"].get("distance", "cosine")
+        embedder = from_spec(spec["embedding"])
+        distance = spec["vectorStore"].get("distance", "cosine")
 
-    if mode == "full":
-        _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
-    else:
-        _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
+        if mode == "full":
+            _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
+        else:
+            _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size)
 
 
 def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size):
-    """Atomic full ingest: versioned shadow → verify → promote via alias."""
-    store = make_store(spec)
-    round_num = int(os.environ.get("INGEST_ROUND", "1"))
+    """Atomic full ingest: versioned shadow → verify → promote via alias.
+
+    Supports checkpoint/resume: reads a checkpoint ConfigMap on startup and
+    skips already-completed sources. After each source a fresh checkpoint is
+    written so interrupted Jobs can be resumed.
+    """
+    with tracer.start_as_current_span("ingest.full") as span:
+        store = make_store(spec)
+        round_num = int(os.environ.get("INGEST_ROUND", "1"))
+        span.set_attribute("ingest.round", round_num)
 
     # Create a versioned staging collection without touching the active target.
     shadow_name = store.staging_name(round_num)
@@ -42,12 +52,28 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_
     shadow_store = make_store(shadow_spec)
     shadow_store.recreate_collection(embedder.dim, distance)
 
-    total = 0
+    # Resume: read any prior checkpoint so we don't re-process completed sources.
+    checkpoint = read_checkpoint()
+    completed: set[str] = set()
     source_results: list[dict] = []
+    total = 0
+    if checkpoint and isinstance(checkpoint.get("completedSources"), list):
+        for entry in checkpoint["completedSources"]:
+            if isinstance(entry, dict) and "name" in entry:
+                completed.add(entry["name"])
+                source_results.append(dict(entry))
+                total += int(entry.get("chunks", 0) or 0)
+        log(f"resuming: skipping {len(completed)} already-completed source(s): {completed}")
+
     try:
         with tempfile.TemporaryDirectory() as tmp:
             for i, src in enumerate(spec["sources"]):
                 name = src["name"]
+
+                if name in completed:
+                    log(f"full ingest: skipping completed source '{name}'")
+                    continue
+
                 log(f"full ingest: fetching source '{name}'")
                 dest = Path(tmp) / f"src-{i}"
                 sd = sources.fetch(src, dest)
@@ -56,6 +82,12 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_
                 source_results.append({"name": name, "revision": sd.revision, "chunks": count})
                 log(f"source '{name}': indexed {count} chunks into {shadow_name}")
                 total += count
+
+                # Write checkpoint after each source so we can resume on failure.
+                write_checkpoint({
+                    "completedSources": source_results,
+                    "totalChunks": total,
+                })
 
         shadow_count = shadow_store.count()
         if shadow_count < total:
@@ -109,9 +141,22 @@ def _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_re
 
 
 def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap, batch_size):
-    """Skip unchanged sources; rebuild atomically when any source changed."""
+    """Skip unchanged sources; rebuild atomically when any source changed.
+
+    Supports checkpoint/resume: reads checkpoint on startup and skips
+    already-completed sources.
+    """
     store = make_store(spec)
     store.ensure_collection(embedder.dim, distance)
+
+    # Resume: read any prior checkpoint so we don't re-process completed sources.
+    checkpoint = read_checkpoint()
+    completed: set[str] = set()
+    if checkpoint and isinstance(checkpoint.get("completedSources"), list):
+        for entry in checkpoint["completedSources"]:
+            if isinstance(entry, dict) and "name" in entry:
+                completed.add(entry["name"])
+        log(f"resuming: skipping {len(completed)} already-completed source(s): {completed}")
 
     prior = prior_sources()
     source_results: list[dict] = []
@@ -120,6 +165,9 @@ def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap,
     with tempfile.TemporaryDirectory() as tmp:
         for i, src in enumerate(spec["sources"]):
             name = src["name"]
+
+            if name in completed:
+                continue
 
             probe = sources.probe_revision(src)
             if probe is not None and probe == _prior_revision(prior, name):
@@ -187,16 +235,18 @@ def _embed_and_upsert(embedder: Embedder, store, points_iter, batch: int = 64) -
 
     Peak memory is one batch of chunks + their vectors, independent of corpus size.
     """
-    total = 0
-    window: list[dict] = []
-    for p in points_iter:
-        window.append(p)
-        if len(window) >= batch:
+    with tracer.start_as_current_span("ingest.embed_and_upsert") as span:
+        total = 0
+        window: list[dict] = []
+        for p in points_iter:
+            window.append(p)
+            if len(window) >= batch:
+                total += _flush(embedder, store, window)
+                window = []
+        if window:
             total += _flush(embedder, store, window)
-            window = []
-    if window:
-        total += _flush(embedder, store, window)
-    return total
+        span.set_attribute("total_chunks", total)
+        return total
 
 
 def _flush(embedder: Embedder, store, window: list[dict]) -> int:

@@ -192,7 +192,7 @@ make test-py            # Python worker tests
 
 make install            # install CRDs
 make run                # run the operator against your current kubeconfig
-make sample             # Qdrant + worker RBAC + eval dataset + KnowledgeBase + Retriever
+make sample             # Qdrant + eval dataset + KnowledgeBase + Retriever
 
 kubectl get kb,vi,rtr
 ```
@@ -202,11 +202,27 @@ In-cluster (prebuilt images are published to GHCR by CI, so you can skip the bui
 ```bash
 # ghcr.io/furkandogmus/{kuberag,kuberag-worker,kuberag-retriever}:latest
 make deploy             # CRDs + RBAC + manager (pulls the published images)
-make worker-rbac        # worker ServiceAccount/RBAC (per KB namespace)
 
 # or build your own first:
 make docker-build-all   # operator + worker + retriever images
 ```
+
+For a tenant-isolated Helm installation that watches only one namespace:
+
+```bash
+helm upgrade --install kuberag deploy/helm/kuberag \
+  --namespace kuberag-system --create-namespace \
+  --set rbac.scope=namespace \
+  --set rbac.watchNamespace=tenant-a
+```
+
+The operator creates a dedicated least-privilege worker ServiceAccount for each
+KnowledgeBase. Set `spec.ingestion.serviceAccountName` only when supplying an
+external identity such as IRSA.
+
+Namespace scope limits the running operator; CRD installation itself remains a
+cluster-level action and therefore still requires cluster-admin installation
+permissions.
 
 Or run the whole thing on a throwaway k3d cluster with one command:
 

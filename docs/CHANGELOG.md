@@ -9,6 +9,32 @@ breaking changes between minors.
 ## [Unreleased]
 
 ### Added
+- **Retriever API-key authentication** through
+  `Retriever.spec.apiKeySecretRef`. Protected retrievers accept either
+  `Authorization: Bearer` or `X-API-Key`; `/healthz` remains open for
+  Kubernetes probes, and Secret rotation triggers an automatic rollout.
+- **Retriever production guards**: optional per-client token-bucket rate
+  limiting, bounded rate-limit state, per-pod concurrency caps, streaming
+  request-body limits, and standard 429/503 `Retry-After` responses.
+- **Controller-managed Retriever PDB and CPU HPA**, plus an operator PDB in the
+  Helm chart. Missing or empty referenced Secrets now keep the Retriever
+  `Pending` and remove its serving workload until configuration is repaired.
+- **Kustomize render validation** in CI. The previously broken `config/crd/`
+  directory reference now has its own Kustomization, so `kubectl apply -k
+  config/` renders successfully.
+- **SBOM and provenance attestations** for all operator, worker, and retriever
+  images published by the release workflow.
+- **Managed Retriever Ingress/TLS and OIDC login**. `spec.ingress` creates an
+  owned Kubernetes Ingress with optional cert-manager ClusterIssuer metadata;
+  `spec.oidc` adds a pinned oauth2-proxy sidecar, Secret-backed client/cookie
+  credentials, optional email-domain/group restrictions, and an owned
+  NetworkPolicy that prevents in-cluster clients from bypassing the proxy.
+- **Namespace-scoped operator mode** through `WATCH_NAMESPACE` and Helm
+  `rbac.scope=namespace`, which renders namespaced Role/RoleBinding resources.
+- **Per-KnowledgeBase worker identity**. Default worker Jobs receive an owned
+  ServiceAccount and RBAC limited to the current result ConfigMap (and eval
+  dataset when needed); access is removed when the Job finishes. Custom
+  ServiceAccounts remain supported and are validated before Job creation.
 - **Production Readiness section** in `ROADMAP.md` cataloguing the
   gaps between `v1alpha1` and a production-viable operator (API
   maturity, security, observability, resilience, multi-tenancy,

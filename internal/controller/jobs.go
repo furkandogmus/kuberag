@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,7 +22,8 @@ import (
 const (
 	defaultWorkerImage    = "ghcr.io/furkandogmus/kuberag-worker:latest"
 	defaultRetrieverImage = "ghcr.io/furkandogmus/kuberag-retriever:latest"
-	defaultWorkerSA       = "kuberag-worker"
+
+	maxConfigMapBytes = 950 * 1024
 
 	labelManagedBy   = "app.kubernetes.io/managed-by"
 	labelKB          = "rag.furkan.dev/knowledgebase"
@@ -40,17 +43,14 @@ func jobType(j *batchv1.Job) string { return j.Labels[labelJobType] }
 // resultConfigMapName is where the worker writes its structured result.
 func resultConfigMapName(jobName string) string { return nameWithSuffix(jobName, "-result") }
 
+// checkpointConfigMapName is where the worker writes its incremental checkpoint
+// so interrupted ingestion can be resumed by a subsequent Job.
+func checkpointConfigMapName(jobName string) string { return nameWithSuffix(jobName, "-checkpoint") }
+
 // IngestResult is the JSON the ingestion worker writes to its result ConfigMap.
 type IngestResult struct {
-	TotalChunks int                  `json:"totalChunks"`
-	Sources     []IngestSourceResult `json:"sources"`
-}
-
-// IngestSourceResult records per-source sync output for incremental tracking.
-type IngestSourceResult struct {
-	Name     string `json:"name"`
-	Revision string `json:"revision"`
-	Chunks   int    `json:"chunks"`
+	TotalChunks int                              `json:"totalChunks"`
+	Sources     []ragv1alpha1.IngestSourceResult `json:"sources"`
 }
 
 // EvalResult is the JSON the eval worker writes.
@@ -80,9 +80,36 @@ func (r *KnowledgeBaseReconciler) deleteResult(ctx context.Context, ns, jobName 
 	_ = r.Delete(ctx, cm)
 }
 
+// readCheckpointResult reads the checkpoint ConfigMap and returns completed
+// sources, or nil if no checkpoint exists.
+func (r *KnowledgeBaseReconciler) readCheckpointResult(ctx context.Context, ns, jobName string) []ragv1alpha1.IngestSourceResult {
+	var cm corev1.ConfigMap
+	key := types.NamespacedName{Namespace: ns, Name: checkpointConfigMapName(jobName)}
+	if err := r.Get(ctx, key, &cm); err != nil {
+		return nil
+	}
+	raw, ok := cm.Data["checkpoint.json"]
+	if !ok || raw == "" {
+		return nil
+	}
+	var checkpoint struct {
+		CompletedSources []ragv1alpha1.IngestSourceResult `json:"completedSources"`
+	}
+	if err := json.Unmarshal([]byte(raw), &checkpoint); err != nil {
+		return nil
+	}
+	return checkpoint.CompletedSources
+}
+
 // deleteSpecConfigMap removes the worker spec ConfigMap (best-effort).
 func (r *KnowledgeBaseReconciler) deleteSpecConfigMap(ctx context.Context, ns, jobName string) {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: specConfigMapName(jobName)}}
+	_ = r.Delete(ctx, cm)
+}
+
+// deleteCheckpointConfigMap removes a consumed checkpoint ConfigMap (best-effort).
+func (r *KnowledgeBaseReconciler) deleteCheckpointConfigMap(ctx context.Context, ns, jobName string) {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: checkpointConfigMapName(jobName)}}
 	_ = r.Delete(ctx, cm)
 }
 
@@ -168,6 +195,12 @@ func resourceRequirements(rr *ragv1alpha1.ResourceRequirements) (corev1.Resource
 // specConfigMapName returns the ConfigMap name for the worker spec mount.
 func specConfigMapName(jobName string) string { return nameWithSuffix(jobName, "-spec") }
 
+// specConfigMapSizeOK returns true when the spec JSON fits within the
+// Kubernetes ConfigMap size boundary (1 MiB max, with overhead headroom).
+func specConfigMapSizeOK(specJSON string) bool {
+	return len(specJSON) <= maxConfigMapBytes
+}
+
 // specConfigMap builds a ConfigMap holding the serialised spec for the worker.
 func specConfigMap(ns, name, specJSON string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
@@ -180,9 +213,21 @@ func specConfigMap(ns, name, specJSON string) *corev1.ConfigMap {
 	}
 }
 
+// traceEnv injects the current OTel context as environment variables so the
+// worker process can continue the trace.
+func traceEnv(ctx context.Context) []corev1.EnvVar {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	env := make([]corev1.EnvVar, 0, len(carrier))
+	for k, v := range carrier {
+		env = append(env, corev1.EnvVar{Name: k, Value: v})
+	}
+	return env
+}
+
 // baseJob assembles the common Job skeleton for a worker invocation.
 // specCMName names the ConfigMap mounted at /etc/kuberag/spec.json.
-func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, secretsHash, specCMName string, args []string, extraEnv []corev1.EnvVar) (*batchv1.Job, error) {
+func baseJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, secretsHash, specCMName string, args []string, extraEnv []corev1.EnvVar) (*batchv1.Job, error) {
 	backoff := int32(2)
 	ttl := int32(300)
 	if kb.Spec.Ingestion.TTLSecondsAfterFinished != nil {
@@ -192,10 +237,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, secretsHas
 	if kb.Spec.Ingestion.ActiveDeadlineSeconds != nil {
 		activeDeadline = *kb.Spec.Ingestion.ActiveDeadlineSeconds
 	}
-	sa := kb.Spec.Ingestion.ServiceAccountName
-	if sa == "" {
-		sa = defaultWorkerSA
-	}
+	sa := workerServiceAccountName(kb)
 
 	env := []corev1.EnvVar{
 		{Name: "KB_NAME", Value: kb.Name},
@@ -203,6 +245,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, secretsHas
 		{Name: "KB_SPEC_PATH", Value: "/etc/kuberag/spec.json"},
 		{Name: "RESULT_CONFIGMAP", Value: resultConfigMapName(name)},
 	}
+	env = append(env, traceEnv(ctx)...)
 	env = append(env, scratchEnv()...)
 	env = append(env, extraEnv...)
 	env = append(env, credentialEnv(kb)...)
@@ -263,19 +306,24 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, secretsHas
 }
 
 // buildIngestJob renders the ingestion Job (clone/chunk/embed/upsert).
-func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, mode ragv1alpha1.IngestMode, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
+func buildIngestJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, mode ragv1alpha1.IngestMode, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
 	specJSON, err := marshalEffectiveSpec(kb, effChunking)
 	if err != nil {
 		return nil, "", err
 	}
 	name := truncName(fmt.Sprintf("%s-ingest-r%d-t%d-c%s-%s",
 		kb.Name, kb.Status.IngestRound, kb.Status.AutoTuneAttempts, chunkFingerprint(effChunking), hash))
+	resumeFromCheckpoint := len(kb.Status.LastCheckpoint) > 0
 	env := []corev1.EnvVar{
 		{Name: "INGEST_MODE", Value: string(mode)},
 		{Name: "INGEST_ROUND", Value: fmt.Sprintf("%d", kb.Status.IngestRound)},
 		{Name: "PRIOR_SOURCES_JSON", Value: priorSourcesJSON(kb)},
+		{Name: "CHECKPOINT_CONFIGMAP", Value: checkpointConfigMapName(name)},
 	}
-	job, err := baseJob(kb, name, jobTypeIngest, hash, secretsHash, specConfigMapName(name), []string{"ingest"}, env)
+	if resumeFromCheckpoint {
+		env = append(env, corev1.EnvVar{Name: "RESUME_FROM_CHECKPOINT", Value: "true"})
+	}
+	job, err := baseJob(ctx, kb, name, jobTypeIngest, hash, secretsHash, specConfigMapName(name), []string{"ingest"}, env)
 	if err != nil {
 		return nil, "", err
 	}
@@ -285,7 +333,7 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, mod
 
 // buildEvalJob renders the retrieval-quality evaluation Job. The round counter
 // makes each evaluation a fresh Job (the spec hash is stable across evals).
-func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, round int, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
+func buildEvalJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, round int, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
 	specJSON, err := marshalEffectiveSpec(kb, effChunking)
 	if err != nil {
 		return nil, "", err
@@ -296,7 +344,7 @@ func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, round
 		{Name: "EVAL_DATASET_CONFIGMAP", Value: rq.DatasetRef.Name},
 		{Name: "EVAL_TOPK", Value: fmt.Sprintf("%d", defaultInt(rq.TopK, 8))},
 	}
-	job, err := baseJob(kb, name, jobTypeEval, hash, secretsHash, specConfigMapName(name), []string{"eval"}, env)
+	job, err := baseJob(ctx, kb, name, jobTypeEval, hash, secretsHash, specConfigMapName(name), []string{"eval"}, env)
 	if err != nil {
 		return nil, "", err
 	}
@@ -305,13 +353,13 @@ func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, round
 }
 
 // buildCleanupJob renders the teardown Job that drops the remote collection.
-func buildCleanupJob(kb *ragv1alpha1.KnowledgeBase, secretsHash string) (*batchv1.Job, string, error) {
+func buildCleanupJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, secretsHash string) (*batchv1.Job, string, error) {
 	specJSON, err := marshalEffectiveSpec(kb, effectiveChunking(kb))
 	if err != nil {
 		return nil, "", err
 	}
 	name := truncName(fmt.Sprintf("%s-cleanup", kb.Name))
-	job, err := baseJob(kb, name, jobTypeCleanup, "", secretsHash, specConfigMapName(name), []string{"cleanup"}, nil)
+	job, err := baseJob(ctx, kb, name, jobTypeCleanup, "", secretsHash, specConfigMapName(name), []string{"cleanup"}, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -337,9 +385,23 @@ func marshalEffectiveSpec(kb *ragv1alpha1.KnowledgeBase, effChunking ragv1alpha1
 	return string(b), nil
 }
 
-// priorSourcesJSON serializes last-synced revisions so the worker can do incremental sync.
+// priorSourcesJSON serializes last-synced revisions so the worker can do incremental
+// sync. It also merges in LastCheckpoint so a resume after failure skips already-
+// completed sources.
 func priorSourcesJSON(kb *ragv1alpha1.KnowledgeBase) string {
-	b, _ := json.Marshal(kb.Status.Sources)
+	sources := kb.Status.Sources
+	if len(kb.Status.LastCheckpoint) > 0 {
+		seen := map[string]bool{}
+		for _, s := range sources {
+			seen[s.Name] = true
+		}
+		for _, c := range kb.Status.LastCheckpoint {
+			if !seen[c.Name] {
+				sources = append(sources, ragv1alpha1.SourceStatus(c))
+			}
+		}
+	}
+	b, _ := json.Marshal(sources)
 	return string(b)
 }
 
@@ -389,12 +451,15 @@ func hardenedPodSecurityContext() *corev1.PodSecurityContext {
 }
 
 // hardenedContainerSecurityContext drops all capabilities, forbids privilege
-// escalation, and runs with a read-only root filesystem (scratch is mounted).
+// escalation, enforces non-root, sets the default seccomp profile, and runs
+// with a read-only root filesystem (scratch is mounted).
 func hardenedContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
 		AllowPrivilegeEscalation: ptr.To(false),
 		ReadOnlyRootFilesystem:   ptr.To(true),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 }
 

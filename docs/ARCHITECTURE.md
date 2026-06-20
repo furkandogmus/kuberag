@@ -32,6 +32,13 @@ Keeping that out of the operator process means:
 
 The operator never imports an ML library; the workers never watch the API.
 
+## Operator scope
+
+Set `WATCH_NAMESPACE` to a namespace name (or comma-separated names) to limit
+the controller-runtime cache and all namespaced reconciliation. The Helm chart
+supports the common single-tenant form with `rbac.scope=namespace`, rendering a
+Role/RoleBinding in `rbac.watchNamespace` instead of cluster-wide RBAC.
+
 ## KnowledgeBase reconcile
 
 The `KnowledgeBase` reconciler is a level-triggered state machine. Each pass:
@@ -185,6 +192,13 @@ Job completion to learn the chunk total and per-source revisions, then deletes
 it. The worker reports `max(store.count(), upserted)` so eventually-consistent
 stores (Milvus) still surface an accurate total.
 
+By default each KnowledgeBase owns a `<kb>-worker` ServiceAccount, Role, and
+RoleBinding. Before a Job starts, the operator pre-creates its result ConfigMap
+and grants `get/update/patch` only for that exact name; evaluation temporarily
+adds the configured dataset ConfigMap. The Role is emptied when the Job
+finishes. Setting `spec.ingestion.serviceAccountName` opts into an externally
+managed identity such as IRSA.
+
 ## Retriever
 
 The `Retriever` reconciler resolves the referenced `KnowledgeBase`, then
@@ -213,6 +227,20 @@ chunks, returning `{answer, results}`.
   redeploying. This powers the built-in [Playground UI](#playground).
 - **Metadata filtering.** Queries can filter by `source`, exact `docPath`, or
   `docPathPrefix`.
+- **Production guards.** Optional API-key authentication and per-client rate
+  limiting run before retrieval. Every pod also enforces configurable
+  concurrency and streaming request-body limits. `/healthz` bypasses these
+  guards for Kubernetes probes.
+- **Availability controls.** The controller manages a PodDisruptionBudget by
+  default for multi-replica Retrievers and can create a CPU-based HPA. Referenced
+  Secrets are validated before serving; missing/empty keys keep the Retriever
+  `Pending` instead of launching a broken or accidentally unprotected pod.
+- **North-south security.** `spec.ingress` creates an owned Ingress and can
+  request a certificate through a cert-manager ClusterIssuer. `spec.oidc`
+  inserts oauth2-proxy in the pod and points the Service at it, so public
+  traffic cannot bypass login. An owned ingress NetworkPolicy exposes only the
+  proxy port to other pods, while pod-local loopback remains available between
+  oauth2-proxy and the retriever.
 - **Playground UI.** A built-in HTML playground (`/`) lets you experiment with
   every retrieval and generation knob interactively, file/URL ingest for ad-hoc
   testing, and view per-query diagnostics (`meta` with candidate count, latency,

@@ -51,10 +51,34 @@ test-py: ## Run Python worker tests.
 api-docs: manifests ## Regenerate docs/API.md from the rendered CRD YAML.
 	$(PYTHON) hack/gen-api-docs.py
 
-.PHONY: lint-helm
+.PHONY: lint-helm lint-kustomize
 lint-helm: ## Lint the Helm chart.
 	@which helm >/dev/null || (echo "helm not found; install from https://helm.sh"; exit 1)
 	helm lint deploy/helm/kuberag/
+	helm template kuberag-scoped deploy/helm/kuberag \
+		--namespace kuberag-system \
+		--set rbac.scope=namespace \
+		--set rbac.watchNamespace=tenant-a >/dev/null
+
+lint-kustomize: ## Render the Kustomize base to catch broken resource references.
+	go run sigs.k8s.io/kustomize/kustomize/v5@v5.7.1 build config >/dev/null
+
+NAMESPACE ?= default
+RETRIEVER ?= kuberag-retriever
+CONCURRENCY ?= 4
+DURATION ?= 30
+
+.PHONY: benchmark
+benchmark: ## Run a load benchmark against a deployed retriever.
+	./hack/benchmark.sh $(NAMESPACE) $(RETRIEVER) $(CONCURRENCY) $(DURATION)
+
+.PHONY: upgrade-test
+upgrade-test: ## Run the Helm chart upgrade simulation.
+	./hack/upgrade-test.sh
+
+.PHONY: govulncheck
+govulncheck: ## Scan Go dependencies for known vulnerabilities.
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 .PHONY: demo
 demo: ## Create a k3d cluster and run a full end-to-end demo.
@@ -83,7 +107,7 @@ deploy: manifests ## Deploy operator (CRD + RBAC + manager) into the cluster.
 	kubectl apply -f config/rbac/role.yaml
 	kubectl apply -f config/manager/manager.yaml          # creates the namespace
 	kubectl apply -f config/rbac/leader_election_role.yaml # needs the namespace
-worker-rbac: ## Install the worker ServiceAccount + RBAC (edit namespace as needed).
+worker-rbac: ## Install the legacy shared worker ServiceAccount + RBAC.
 	kubectl apply -f config/rbac/worker_rbac.yaml -n default
 undeploy:
 	kubectl delete -f config/manager/manager.yaml || true
@@ -92,7 +116,7 @@ undeploy:
 	kubectl delete -f config/crd || true
 
 .PHONY: sample sample-clean
-sample: worker-rbac ## Apply Qdrant + eval dataset + example KnowledgeBase + Retriever.
+sample: ## Apply Qdrant + eval dataset + example KnowledgeBase + Retriever.
 	kubectl apply -f config/samples/qdrant.yaml
 	kubectl apply -f config/samples/eval-dataset.yaml
 	kubectl apply -f config/samples/knowledgebase.yaml
@@ -102,6 +126,10 @@ sample-clean:
 	kubectl delete -f config/samples/knowledgebase.yaml --ignore-not-found
 	kubectl delete -f config/samples/eval-dataset.yaml --ignore-not-found
 	kubectl delete -f config/samples/qdrant.yaml --ignore-not-found
+
+.PHONY: verify-pss
+verify-pss: ## Verify Pod Security Standards compliance.
+	./hack/verify-pss.sh
 
 .PHONY: help
 help:

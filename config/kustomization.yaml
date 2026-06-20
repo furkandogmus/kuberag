@@ -11,6 +11,7 @@ resources:
   - crd/
   - rbac/role.yaml
   - rbac/leader_election_role.yaml
+  - rbac/operator-pdb.yaml
   - rbac/priority-class.yaml
   - manager/manager.yaml
 

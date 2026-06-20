@@ -1,0 +1,126 @@
+{
+  "title": "kuberag SLO",
+  "uid": "kuberag-slo",
+  "tags": ["kuberag", "slo", "rag"],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingestion Freshness",
+      "type": "gauge",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 3600},
+              {"color": "red", "value": 86400}
+            ]
+          },
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "time() - max(rag_knowledgebase_ingestions_total{result=\"succeeded\"}) by (namespace)",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "options": {"showThresholdLabels": true, "showThresholdMarkers": true}
+    },
+    {
+      "id": 2,
+      "title": "Recall Percentiles",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(rag_knowledgebase_recall_percent[5m])) by (le, namespace))",
+          "refId": "A",
+          "legendFormat": "p50 - {{namespace}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(rag_knowledgebase_recall_percent[5m])) by (le, namespace))",
+          "refId": "B",
+          "legendFormat": "p95 - {{namespace}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(rag_knowledgebase_recall_percent[5m])) by (le, namespace))",
+          "refId": "C",
+          "legendFormat": "p99 - {{namespace}}"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom"}
+      }
+    },
+    {
+      "id": 3,
+      "title": "Retriever Latency",
+      "type": "text",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 6},
+      "options": {
+        "mode": "markdown",
+        "content": "# Retriever Latency\n\nRetriever latency metrics are not yet instrumented in the retriever server.\n\nPlanned metrics:\n- `rag_retriever_query_duration_seconds` (histogram)\n- `rag_retriever_query_total` (counter)\n\nTrack [issue #TODO](https://github.com/furkandogmus/kuberag/issues) for progress."
+      }
+    },
+    {
+      "id": 4,
+      "title": "Ingestion Error Rate",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 6},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0.05}
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(rag_knowledgebase_ingestions_total{result=\"failed\"}[5m]) / rate(rag_knowledgebase_ingestions_total[5m])",
+          "refId": "A",
+          "legendFormat": "{{namespace}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Auto-tune Duration p95",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 14, "w": 24, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(rag_knowledgebase_autotune_duration_seconds_bucket[30m]))",
+          "refId": "A",
+          "legendFormat": "p95"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom"}
+      }
+    }
+  ]
+}

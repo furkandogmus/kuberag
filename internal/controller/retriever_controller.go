@@ -6,8 +6,14 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -34,6 +40,10 @@ type RetrieverReconciler struct {
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=retrievers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rag.furkan.dev,resources=retrievers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
@@ -43,12 +53,27 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	tracer := otel.Tracer("kuberag")
+	ctx, span := tracer.Start(ctx, "Retriever.Reconcile",
+		trace.WithAttributes(
+			attribute.String("retriever.name", rt.Name),
+			attribute.String("retriever.namespace", rt.Namespace),
+		))
+	defer span.End()
+
 	// Resolve the referenced KnowledgeBase to wire store/model into the server.
 	var kb ragv1alpha1.KnowledgeBase
 	kbKey := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Spec.KnowledgeBaseRef.Name}
 	if err := r.Get(ctx, kbKey, &kb); err != nil {
 		if apierrors.IsNotFound(err) {
+			if err := r.removeRetrieverWorkload(ctx, &rt); err != nil {
+				return ctrl.Result{}, err
+			}
 			rt.Status.Phase = "Pending"
+			rt.Status.ReadyReplicas = 0
+			rt.Status.ServiceEndpoint = ""
+			rt.Status.PublicEndpoint = ""
+			rt.Status.ObservedGeneration = rt.Generation
 			setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionFalse,
 				"KnowledgeBaseNotFound", "referenced KnowledgeBase not found")
 			return ctrl.Result{}, r.Status().Update(ctx, &rt)
@@ -56,12 +81,25 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	if reason, message := r.validateRetrieverSecrets(ctx, &rt, &kb); reason != "" {
+		if err := r.removeRetrieverWorkload(ctx, &rt); err != nil {
+			return ctrl.Result{}, err
+		}
+		rt.Status.Phase = "Pending"
+		rt.Status.ReadyReplicas = 0
+		rt.Status.ServiceEndpoint = ""
+		rt.Status.PublicEndpoint = ""
+		rt.Status.ObservedGeneration = rt.Generation
+		setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionFalse, reason, message)
+		return ctrl.Result{}, r.Status().Update(ctx, &rt)
+	}
+
 	secretHash := r.computeSecretsHash(ctx, &rt, &kb)
 	dep := r.desiredDeployment(&rt, &kb, secretHash)
 	if err := controllerutil.SetControllerReference(&rt, dep, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.applyDeployment(ctx, dep); err != nil {
+	if err := r.applyDeployment(ctx, dep, autoscalingEnabled(&rt)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -70,6 +108,19 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 	if err := r.applyService(ctx, svc); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileIngress(ctx, &rt); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileOIDCNetworkPolicy(ctx, &rt); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcilePodDisruptionBudget(ctx, &rt); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileHorizontalPodAutoscaler(ctx, &rt); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -81,6 +132,18 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	rt.Status.ReadyReplicas = live.Status.ReadyReplicas
 	rt.Status.ObservedGeneration = rt.Generation
 	rt.Status.ServiceEndpoint = fmt.Sprintf("http://%s.%s.svc:8000", svc.Name, svc.Namespace)
+	rt.Status.PublicEndpoint = ""
+	if rt.Spec.Ingress != nil {
+		scheme := "http"
+		if rt.Spec.Ingress.TLSSecretName != "" {
+			scheme = "https"
+		}
+		path := rt.Spec.Ingress.Path
+		if path == "" {
+			path = "/"
+		}
+		rt.Status.PublicEndpoint = fmt.Sprintf("%s://%s%s", scheme, rt.Spec.Ingress.Host, path)
+	}
 
 	// Check VectorIndex health before reporting Available.
 	var vi ragv1alpha1.VectorIndex
@@ -94,11 +157,12 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	if live.Status.ReadyReplicas >= rt.Spec.Replicas && rt.Spec.Replicas > 0 {
+	minReady := desiredMinimumReplicas(&rt)
+	if live.Status.ReadyReplicas >= minReady && minReady > 0 {
 		if viHealthy {
 			rt.Status.Phase = "Available"
 			setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionTrue, "MinimumReplicasAvailable",
-				fmt.Sprintf("%d/%d replicas ready", live.Status.ReadyReplicas, rt.Spec.Replicas))
+				fmt.Sprintf("%d/%d replicas ready", live.Status.ReadyReplicas, minReady))
 		} else {
 			rt.Status.Phase = "Progressing"
 			setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionFalse, "VectorIndexUnhealthy",
@@ -107,7 +171,7 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	} else {
 		rt.Status.Phase = "Progressing"
 		setRetrieverCond(&rt, ragv1alpha1.ConditionAvailable, metav1.ConditionFalse, "Progressing",
-			fmt.Sprintf("%d/%d replicas ready", live.Status.ReadyReplicas, rt.Spec.Replicas))
+			fmt.Sprintf("%d/%d replicas ready", live.Status.ReadyReplicas, minReady))
 	}
 	return ctrl.Result{}, r.Status().Update(ctx, &rt)
 }
@@ -118,6 +182,14 @@ func (r *RetrieverReconciler) computeSecretsHash(ctx context.Context, rt *ragv1a
 	appendSecretHash(ctx, r.Client, kb.Namespace, "vectorStore.credentials", kb.Spec.VectorStore.CredentialsSecretRef, hasher)
 	appendSecretHash(ctx, r.Client, kb.Namespace, "embedding.apiKey", kb.Spec.Embedding.APIKeySecretRef, hasher)
 
+	if rt.Spec.APIKeySecretRef != nil {
+		appendSecretHash(ctx, r.Client, rt.Namespace, "retriever.apiKey", rt.Spec.APIKeySecretRef, hasher)
+	}
+	if rt.Spec.OIDC != nil {
+		appendSecretHash(ctx, r.Client, rt.Namespace, "oidc.clientID", &rt.Spec.OIDC.ClientIDSecretRef, hasher)
+		appendSecretHash(ctx, r.Client, rt.Namespace, "oidc.clientSecret", &rt.Spec.OIDC.ClientSecretSecretRef, hasher)
+		appendSecretHash(ctx, r.Client, rt.Namespace, "oidc.cookieSecret", &rt.Spec.OIDC.CookieSecretRef, hasher)
+	}
 	if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil {
 		appendSecretHash(ctx, r.Client, rt.Namespace, "generation.apiKey", rt.Spec.Generation.APIKeySecretRef, hasher)
 	}
@@ -146,12 +218,112 @@ func intPtrVal(i *int, def int) int {
 	return *i
 }
 
+func autoscalingEnabled(rt *ragv1alpha1.Retriever) bool {
+	return rt.Spec.Autoscaling != nil && boolPtrVal(rt.Spec.Autoscaling.Enabled, false)
+}
+
+func oidcEnabled(rt *ragv1alpha1.Retriever) bool {
+	return rt.Spec.OIDC != nil
+}
+
+func desiredMinimumReplicas(rt *ragv1alpha1.Retriever) int32 {
+	if autoscalingEnabled(rt) {
+		return defaultInt32(rt.Spec.Autoscaling.MinReplicas, 2)
+	}
+	return rt.Spec.Replicas
+}
+
+func defaultInt32(v, def int32) int32 {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
+func defaultInt64(v, def int64) int64 {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
+func (r *RetrieverReconciler) validateRetrieverSecrets(ctx context.Context, rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase) (string, string) {
+	refs := []struct {
+		label string
+		ref   *ragv1alpha1.SecretKeyRef
+	}{
+		{"vector store credentials", kb.Spec.VectorStore.CredentialsSecretRef},
+		{"embedding API key", kb.Spec.Embedding.APIKeySecretRef},
+		{"retriever API key", rt.Spec.APIKeySecretRef},
+	}
+	if rt.Spec.Generation != nil {
+		refs = append(refs, struct {
+			label string
+			ref   *ragv1alpha1.SecretKeyRef
+		}{"generation API key", rt.Spec.Generation.APIKeySecretRef})
+	}
+	if rt.Spec.OIDC != nil {
+		refs = append(refs,
+			struct {
+				label string
+				ref   *ragv1alpha1.SecretKeyRef
+			}{"OIDC client ID", &rt.Spec.OIDC.ClientIDSecretRef},
+			struct {
+				label string
+				ref   *ragv1alpha1.SecretKeyRef
+			}{"OIDC client secret", &rt.Spec.OIDC.ClientSecretSecretRef},
+			struct {
+				label string
+				ref   *ragv1alpha1.SecretKeyRef
+			}{"OIDC cookie secret", &rt.Spec.OIDC.CookieSecretRef},
+		)
+	}
+
+	for _, item := range refs {
+		if item.ref == nil {
+			continue
+		}
+		var secret corev1.Secret
+		key := types.NamespacedName{Namespace: rt.Namespace, Name: item.ref.Name}
+		if err := r.Get(ctx, key, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "SecretNotFound", fmt.Sprintf("%s Secret %q not found", item.label, item.ref.Name)
+			}
+			return "SecretReadFailed", fmt.Sprintf("cannot read %s Secret %q: %v", item.label, item.ref.Name, err)
+		}
+		value, ok := secret.Data[item.ref.Key]
+		if !ok {
+			return "SecretKeyNotFound", fmt.Sprintf("%s Secret %q does not contain key %q", item.label, item.ref.Name, item.ref.Key)
+		}
+		if len(value) == 0 {
+			return "SecretKeyEmpty", fmt.Sprintf("%s Secret %q key %q is empty", item.label, item.ref.Name, item.ref.Key)
+		}
+	}
+	return "", ""
+}
+
+func (r *RetrieverReconciler) removeRetrieverWorkload(ctx context.Context, rt *ragv1alpha1.Retriever) error {
+	objects := []client.Object{
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: rt.Name + "-retriever", Namespace: rt.Namespace}},
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: rt.Name + "-retriever", Namespace: rt.Namespace}},
+		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: rt.Name + "-retriever", Namespace: rt.Namespace}},
+		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: rt.Name + "-retriever", Namespace: rt.Namespace}},
+		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: rt.Name + "-retriever-oidc", Namespace: rt.Namespace}},
+	}
+	for _, obj := range objects {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *ragv1alpha1.KnowledgeBase, secretHash string) *appsv1.Deployment {
 	labels := map[string]string{
 		labelManagedBy:             "kuberag",
 		"rag.furkan.dev/retriever": rt.Name,
 	}
-	replicas := rt.Spec.Replicas
+	replicas := desiredMinimumReplicas(rt)
 	collection := kb.Spec.VectorStore.Collection
 	if collection == "" {
 		collection = kb.Name
@@ -192,12 +364,27 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		{Name: "RERANK_CANDIDATES", Value: fmt.Sprintf("%d", rerankCandidates)},
 		{Name: "HYBRID_DEFAULT", Value: fmt.Sprintf("%t", rt.Spec.Hybrid)},
 		{Name: "HYBRID_DENSE_PERCENT", Value: fmt.Sprintf("%d", intPtrVal(rt.Spec.HybridDensePercent, 50))},
+		{Name: "MAX_CONCURRENT_REQUESTS", Value: fmt.Sprintf("%d", defaultInt(rt.Spec.MaxConcurrentRequests, 32))},
+		{Name: "MAX_REQUEST_BODY_BYTES", Value: fmt.Sprintf("%d", defaultInt64(rt.Spec.MaxRequestBodyBytes, 1048576))},
+	}
+	if rate := rt.Spec.RateLimit; rate != nil && boolPtrVal(rate.Enabled, true) {
+		env = append(env,
+			corev1.EnvVar{Name: "RATE_LIMIT_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "RATE_LIMIT_REQUESTS_PER_MINUTE", Value: fmt.Sprintf("%d", defaultInt(rate.RequestsPerMinute, 60))},
+			corev1.EnvVar{Name: "RATE_LIMIT_BURST", Value: fmt.Sprintf("%d", defaultInt(rate.Burst, 20))},
+		)
 	}
 	if kb.Spec.VectorStore.CredentialsSecretRef != nil {
 		env = append(env, secretEnv("VECTORSTORE_CREDENTIAL", kb.Spec.VectorStore.CredentialsSecretRef))
 	}
 	if emb.APIKeySecretRef != nil {
 		env = append(env, secretEnv("EMBEDDING_API_KEY", emb.APIKeySecretRef))
+	}
+	if rt.Spec.APIKeySecretRef != nil {
+		env = append(env,
+			corev1.EnvVar{Name: "RETRIEVER_AUTH_ENABLED", Value: "true"},
+			secretEnv("RETRIEVER_API_KEY", rt.Spec.APIKeySecretRef),
+		)
 	}
 
 	// Optional LLM answer synthesis (full RAG).
@@ -234,6 +421,119 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		}
 	}
 
+	containers := []corev1.Container{
+		{
+			Name:            "retriever",
+			Image:           retrieverImage(rt),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Ports:           []corev1.ContainerPort{{ContainerPort: 8000, Name: "http"}},
+			Env:             env,
+			Resources:       resources,
+			SecurityContext: hardenedContainerSecurityContext(),
+			VolumeMounts:    []corev1.VolumeMount{scratchMount()},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/healthz",
+						Port: intstr.FromInt32(8000),
+					},
+				},
+				InitialDelaySeconds: 10,
+				PeriodSeconds:       10,
+			},
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/healthz",
+						Port: intstr.FromInt32(8000),
+					},
+				},
+				InitialDelaySeconds: 60,
+				PeriodSeconds:       30,
+			},
+			StartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/healthz",
+						Port: intstr.FromInt32(8000),
+					},
+				},
+				FailureThreshold: 18,
+				PeriodSeconds:    10,
+			},
+		},
+	}
+	if oidc := rt.Spec.OIDC; oidc != nil {
+		emailDomains := oidc.EmailDomains
+		if len(emailDomains) == 0 {
+			emailDomains = []string{"*"}
+		}
+		scheme := "http"
+		if rt.Spec.Ingress != nil && rt.Spec.Ingress.TLSSecretName != "" {
+			scheme = "https"
+		}
+		args := []string{
+			"--provider=oidc",
+			"--oidc-issuer-url=" + oidc.IssuerURL,
+			"--http-address=0.0.0.0:4180",
+			"--upstream=http://127.0.0.1:8000",
+			"--redirect-url=" + scheme + "://" + rt.Spec.Ingress.Host + "/oauth2/callback",
+			"--reverse-proxy=true",
+			"--skip-provider-button=true",
+			"--code-challenge-method=S256",
+			"--cookie-name=_kuberag_oauth2_proxy",
+			"--cookie-samesite=lax",
+			fmt.Sprintf("--cookie-secure=%t", scheme == "https"),
+		}
+		for _, domain := range emailDomains {
+			args = append(args, "--email-domain="+domain)
+		}
+		for _, group := range oidc.Groups {
+			args = append(args, "--allowed-group="+group)
+		}
+		image := oidc.Image
+		if image == "" {
+			image = "quay.io/oauth2-proxy/oauth2-proxy:v7.15.3"
+		}
+		containers = append(containers, corev1.Container{
+			Name:            "oauth2-proxy",
+			Image:           image,
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Args:            args,
+			Ports:           []corev1.ContainerPort{{ContainerPort: 4180, Name: "proxy"}},
+			Env: []corev1.EnvVar{
+				secretEnv("OAUTH2_PROXY_CLIENT_ID", &oidc.ClientIDSecretRef),
+				secretEnv("OAUTH2_PROXY_CLIENT_SECRET", &oidc.ClientSecretSecretRef),
+				secretEnv("OAUTH2_PROXY_COOKIE_SECRET", &oidc.CookieSecretRef),
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("25m"),
+					corev1.ResourceMemory: resource.MustParse("32Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("250m"),
+					corev1.ResourceMemory: resource.MustParse("128Mi"),
+				},
+			},
+			SecurityContext: hardenedContainerSecurityContext(),
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/ping", Port: intstr.FromInt32(4180)},
+				},
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       10,
+			},
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/ping", Port: intstr.FromInt32(4180)},
+				},
+				InitialDelaySeconds: 15,
+				PeriodSeconds:       20,
+			},
+		})
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rt.Name + "-retriever",
@@ -267,48 +567,7 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 							LabelSelector:     &metav1.LabelSelector{MatchLabels: labels},
 						},
 					},
-					Containers: []corev1.Container{
-						{
-							Name:            "retriever",
-							Image:           retrieverImage(rt),
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Ports:           []corev1.ContainerPort{{ContainerPort: 8000, Name: "http"}},
-							Env:             env,
-							Resources:       resources,
-							SecurityContext: hardenedContainerSecurityContext(),
-							VolumeMounts:    []corev1.VolumeMount{scratchMount()},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromInt32(8000),
-									},
-								},
-								InitialDelaySeconds: 10,
-								PeriodSeconds:       10,
-							},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromInt32(8000),
-									},
-								},
-								InitialDelaySeconds: 60,
-								PeriodSeconds:       30,
-							},
-							StartupProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromInt32(8000),
-									},
-								},
-								FailureThreshold: 18,
-								PeriodSeconds:    10,
-							},
-						},
-					},
+					Containers: containers,
 				},
 			},
 		},
@@ -320,6 +579,10 @@ func (r *RetrieverReconciler) desiredService(rt *ragv1alpha1.Retriever) *corev1.
 		labelManagedBy:             "kuberag",
 		"rag.furkan.dev/retriever": rt.Name,
 	}
+	targetPort := intstr.FromInt32(8000)
+	if oidcEnabled(rt) {
+		targetPort = intstr.FromInt32(4180)
+	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rt.Name + "-retriever",
@@ -329,13 +592,130 @@ func (r *RetrieverReconciler) desiredService(rt *ragv1alpha1.Retriever) *corev1.
 		Spec: corev1.ServiceSpec{
 			Selector: labels,
 			Ports: []corev1.ServicePort{
-				{Name: "http", Port: 8000, TargetPort: intstr.FromInt32(8000)},
+				{Name: "http", Port: 8000, TargetPort: targetPort},
 			},
 		},
 	}
 }
 
-func (r *RetrieverReconciler) applyDeployment(ctx context.Context, dep *appsv1.Deployment) error {
+func (r *RetrieverReconciler) reconcileIngress(ctx context.Context, rt *ragv1alpha1.Retriever) error {
+	key := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Name + "-retriever"}
+	if rt.Spec.Ingress == nil {
+		return client.IgnoreNotFound(r.Delete(ctx, &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		}))
+	}
+
+	path := rt.Spec.Ingress.Path
+	if path == "" {
+		path = "/"
+	}
+	pathType := networkingv1.PathTypePrefix
+	annotations := make(map[string]string, len(rt.Spec.Ingress.Annotations)+1)
+	for k, v := range rt.Spec.Ingress.Annotations {
+		annotations[k] = v
+	}
+	if rt.Spec.Ingress.ClusterIssuer != "" {
+		annotations["cert-manager.io/cluster-issuer"] = rt.Spec.Ingress.ClusterIssuer
+	}
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        key.Name,
+			Namespace:   key.Namespace,
+			Annotations: annotations,
+			Labels: map[string]string{
+				labelManagedBy:             "kuberag",
+				"rag.furkan.dev/retriever": rt.Name,
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				Host: rt.Spec.Ingress.Host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     path,
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: rt.Name + "-retriever",
+									Port: networkingv1.ServiceBackendPort{Number: 8000},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+	if rt.Spec.Ingress.ClassName != "" {
+		ingress.Spec.IngressClassName = ptr.To(rt.Spec.Ingress.ClassName)
+	}
+	if rt.Spec.Ingress.TLSSecretName != "" {
+		ingress.Spec.TLS = []networkingv1.IngressTLS{{
+			Hosts:      []string{rt.Spec.Ingress.Host},
+			SecretName: rt.Spec.Ingress.TLSSecretName,
+		}}
+	}
+	if err := controllerutil.SetControllerReference(rt, ingress, r.Scheme); err != nil {
+		return err
+	}
+
+	var existing networkingv1.Ingress
+	if err := r.Get(ctx, key, &existing); apierrors.IsNotFound(err) {
+		return r.Create(ctx, ingress)
+	} else if err != nil {
+		return err
+	}
+	existing.Labels = ingress.Labels
+	existing.Annotations = ingress.Annotations
+	existing.Spec = ingress.Spec
+	return r.Update(ctx, &existing)
+}
+
+func (r *RetrieverReconciler) reconcileOIDCNetworkPolicy(ctx context.Context, rt *ragv1alpha1.Retriever) error {
+	key := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Name + "-retriever-oidc"}
+	if !oidcEnabled(rt) {
+		return client.IgnoreNotFound(r.Delete(ctx, &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		}))
+	}
+
+	labels := map[string]string{
+		labelManagedBy:             "kuberag",
+		"rag.furkan.dev/retriever": rt.Name,
+	}
+	proxyPort := intstr.FromInt32(4180)
+	protocol := corev1.ProtocolTCP
+	policy := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: labels},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: labels},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				Ports: []networkingv1.NetworkPolicyPort{{
+					Protocol: &protocol,
+					Port:     &proxyPort,
+				}},
+			}},
+		},
+	}
+	if err := controllerutil.SetControllerReference(rt, policy, r.Scheme); err != nil {
+		return err
+	}
+
+	var existing networkingv1.NetworkPolicy
+	if err := r.Get(ctx, key, &existing); apierrors.IsNotFound(err) {
+		return r.Create(ctx, policy)
+	} else if err != nil {
+		return err
+	}
+	existing.Labels = policy.Labels
+	existing.Spec = policy.Spec
+	return r.Update(ctx, &existing)
+}
+
+func (r *RetrieverReconciler) applyDeployment(ctx context.Context, dep *appsv1.Deployment, preserveReplicas bool) error {
 	var existing appsv1.Deployment
 	err := r.Get(ctx, types.NamespacedName{Namespace: dep.Namespace, Name: dep.Name}, &existing)
 	if apierrors.IsNotFound(err) {
@@ -344,8 +724,104 @@ func (r *RetrieverReconciler) applyDeployment(ctx context.Context, dep *appsv1.D
 	if err != nil {
 		return err
 	}
+	if preserveReplicas {
+		dep.Spec.Replicas = existing.Spec.Replicas
+	}
 	existing.Spec = dep.Spec
 	existing.Labels = dep.Labels
+	return r.Update(ctx, &existing)
+}
+
+func (r *RetrieverReconciler) reconcilePodDisruptionBudget(ctx context.Context, rt *ragv1alpha1.Retriever) error {
+	enabled := rt.Spec.PodDisruptionBudget == nil && desiredMinimumReplicas(rt) > 1
+	if rt.Spec.PodDisruptionBudget != nil {
+		enabled = *rt.Spec.PodDisruptionBudget
+	}
+	key := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Name + "-retriever"}
+	if !enabled {
+		return client.IgnoreNotFound(r.Delete(ctx, &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		}))
+	}
+
+	labels := map[string]string{
+		labelManagedBy:             "kuberag",
+		"rag.furkan.dev/retriever": rt.Name,
+	}
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: labels},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: ptr.To(intstr.FromInt32(1)),
+			Selector:     &metav1.LabelSelector{MatchLabels: labels},
+		},
+	}
+	if err := controllerutil.SetControllerReference(rt, pdb, r.Scheme); err != nil {
+		return err
+	}
+
+	var existing policyv1.PodDisruptionBudget
+	if err := r.Get(ctx, key, &existing); apierrors.IsNotFound(err) {
+		return r.Create(ctx, pdb)
+	} else if err != nil {
+		return err
+	}
+	existing.Labels = pdb.Labels
+	existing.Spec = pdb.Spec
+	return r.Update(ctx, &existing)
+}
+
+func (r *RetrieverReconciler) reconcileHorizontalPodAutoscaler(ctx context.Context, rt *ragv1alpha1.Retriever) error {
+	key := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Name + "-retriever"}
+	if !autoscalingEnabled(rt) {
+		return client.IgnoreNotFound(r.Delete(ctx, &autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		}))
+	}
+
+	minReplicas := defaultInt32(rt.Spec.Autoscaling.MinReplicas, 2)
+	maxReplicas := defaultInt32(rt.Spec.Autoscaling.MaxReplicas, 10)
+	targetCPU := defaultInt32(rt.Spec.Autoscaling.TargetCPUUtilizationPercentage, 70)
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+			Labels: map[string]string{
+				labelManagedBy:             "kuberag",
+				"rag.furkan.dev/retriever": rt.Name,
+			},
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       rt.Name + "-retriever",
+			},
+			MinReplicas: &minReplicas,
+			MaxReplicas: maxReplicas,
+			Metrics: []autoscalingv2.MetricSpec{{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: corev1.ResourceCPU,
+					Target: autoscalingv2.MetricTarget{
+						Type:               autoscalingv2.UtilizationMetricType,
+						AverageUtilization: &targetCPU,
+					},
+				},
+			}},
+		},
+	}
+	if err := controllerutil.SetControllerReference(rt, hpa, r.Scheme); err != nil {
+		return err
+	}
+
+	var existing autoscalingv2.HorizontalPodAutoscaler
+	if err := r.Get(ctx, key, &existing); apierrors.IsNotFound(err) {
+		return r.Create(ctx, hpa)
+	} else if err != nil {
+		return err
+	}
+	existing.Labels = hpa.Labels
+	existing.Spec = hpa.Spec
 	return r.Update(ctx, &existing)
 }
 
@@ -379,6 +855,10 @@ func (r *RetrieverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&ragv1alpha1.Retriever{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Owns(&networkingv1.Ingress{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(
 			&ragv1alpha1.KnowledgeBase{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -417,27 +897,33 @@ func (r *RetrieverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 				var reqs []reconcile.Request
 				for _, rt := range list.Items {
+					referenced := rt.Spec.APIKeySecretRef != nil && rt.Spec.APIKeySecretRef.Name == secret.Name
+					if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil && rt.Spec.Generation.APIKeySecretRef.Name == secret.Name {
+						referenced = true
+					}
+					if rt.Spec.OIDC != nil &&
+						(rt.Spec.OIDC.ClientIDSecretRef.Name == secret.Name ||
+							rt.Spec.OIDC.ClientSecretSecretRef.Name == secret.Name ||
+							rt.Spec.OIDC.CookieSecretRef.Name == secret.Name) {
+						referenced = true
+					}
 					var kb ragv1alpha1.KnowledgeBase
 					kbKey := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Spec.KnowledgeBaseRef.Name}
 					if err := r.Get(ctx, kbKey, &kb); err == nil {
-						referenced := false
 						if kb.Spec.VectorStore.CredentialsSecretRef != nil && kb.Spec.VectorStore.CredentialsSecretRef.Name == secret.Name {
 							referenced = true
 						}
 						if kb.Spec.Embedding.APIKeySecretRef != nil && kb.Spec.Embedding.APIKeySecretRef.Name == secret.Name {
 							referenced = true
 						}
-						if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil && rt.Spec.Generation.APIKeySecretRef.Name == secret.Name {
-							referenced = true
-						}
-						if referenced {
-							reqs = append(reqs, reconcile.Request{
-								NamespacedName: types.NamespacedName{
-									Namespace: rt.Namespace,
-									Name:      rt.Name,
-								},
-							})
-						}
+					}
+					if referenced {
+						reqs = append(reqs, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Namespace: rt.Namespace,
+								Name:      rt.Name,
+							},
+						})
 					}
 				}
 				return reqs

@@ -41,6 +41,15 @@ class TestRetrieverServer(unittest.TestCase):
         server._GEN_ENABLED = True
         server._RERANK = False
         server._HYBRID_DEFAULT = False
+        server._AUTH_ENABLED = False
+        server._API_KEY = ""
+        server._RATE_LIMIT_ENABLED = False
+        server._RATE_LIMIT_RPM = 60
+        server._RATE_LIMIT_BURST = 20
+        server._MAX_CONCURRENT_REQUESTS = 32
+        server._MAX_REQUEST_BODY_BYTES = 1048576
+        server._active_requests = 0
+        server._rate_buckets.clear()
 
     def tearDown(self):
         self.patcher_ensure.stop()
@@ -48,6 +57,13 @@ class TestRetrieverServer(unittest.TestCase):
         server._store = None
         server._gen_client = None
         server._HYBRID_DEFAULT = False
+        server._AUTH_ENABLED = False
+        server._API_KEY = ""
+        server._RATE_LIMIT_ENABLED = False
+        server._MAX_CONCURRENT_REQUESTS = 32
+        server._MAX_REQUEST_BODY_BYTES = 1048576
+        server._active_requests = 0
+        server._rate_buckets.clear()
 
     def test_query_with_source_filter(self):
         # Mock embedder output
@@ -394,6 +410,89 @@ class TestRetrieverServer(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("text/html", resp.headers["content-type"])
         self.assertIn("kuberag | RAG Playground", resp.text)
+
+    def test_api_key_auth_accepts_bearer_and_x_api_key(self):
+        server._AUTH_ENABLED = True
+        server._API_KEY = "top-secret"
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = []
+
+        missing = self.client.post("/query", json={"query": "hello"})
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(missing.headers["www-authenticate"], "Bearer")
+
+        wrong = self.client.post(
+            "/query",
+            json={"query": "hello"},
+            headers={"Authorization": "Bearer wrong"},
+        )
+        self.assertEqual(wrong.status_code, 401)
+
+        bearer = self.client.post(
+            "/query",
+            json={"query": "hello"},
+            headers={"Authorization": "Bearer top-secret"},
+        )
+        self.assertEqual(bearer.status_code, 200)
+
+        api_key = self.client.post(
+            "/query",
+            json={"query": "hello"},
+            headers={"X-API-Key": "top-secret"},
+        )
+        self.assertEqual(api_key.status_code, 200)
+
+    def test_healthz_does_not_require_api_key(self):
+        server._AUTH_ENABLED = True
+        server._API_KEY = "top-secret"
+        resp = self.client.get("/healthz")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "ok"})
+
+    def test_empty_configured_api_key_fails_closed(self):
+        server._AUTH_ENABLED = True
+        server._API_KEY = ""
+        resp = self.client.post("/query", json={"query": "hello"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_rate_limit_returns_429_with_retry_after(self):
+        server._RATE_LIMIT_ENABLED = True
+        server._RATE_LIMIT_RPM = 1
+        server._RATE_LIMIT_BURST = 1
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = []
+
+        first = self.client.post("/query", json={"query": "hello"})
+        second = self.client.post("/query", json={"query": "hello"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+        self.assertGreaterEqual(int(second.headers["retry-after"]), 1)
+
+    def test_concurrency_limit_returns_503(self):
+        server._MAX_CONCURRENT_REQUESTS = 1
+        server._active_requests = 1
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.headers["retry-after"], "1")
+
+    def test_request_body_limit_returns_413(self):
+        server._MAX_REQUEST_BODY_BYTES = 1024
+        resp = self.client.post(
+            "/query",
+            content="x" * 1025,
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.status_code, 413)
+
+    def test_healthz_bypasses_runtime_guards(self):
+        server._AUTH_ENABLED = True
+        server._API_KEY = "secret"
+        server._RATE_LIMIT_ENABLED = True
+        server._MAX_CONCURRENT_REQUESTS = 1
+        server._active_requests = 1
+        resp = self.client.get("/healthz")
+        self.assertEqual(resp.status_code, 200)
 
 
 if __name__ == "__main__":

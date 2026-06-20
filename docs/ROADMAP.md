@@ -40,6 +40,12 @@ welcome.
   Rank Fusion (RRF), configurable dense/lexical weight per-Retriever or per-request
 - **Reranking**: cross-encoder (fastembed) with configurable candidate pool size
 - **Metadata filtering**: per-query filter by `source`, `docPath`, `docPathPrefix`
+- **API-key authentication**: optional Secret-backed Bearer or `X-API-Key`
+  protection on all endpoints except `/healthz`; Secret rotation rolls pods
+- **Ingress, TLS, and OIDC**: optional managed Ingress with cert-manager
+  ClusterIssuer annotation and an oauth2-proxy sidecar for generic OIDC login
+- **Runtime overload protection**: optional per-client token-bucket rate
+  limiting plus per-pod concurrency and streaming request-body limits
 - **Conversational RAG**: multi-turn history injection into LLM prompt
 - **Per-request tuning**: `topK`, `hybrid`, `hybridDensePercent`,
   `scoreThresholdPercent`, `rerank`, `temperature`, `maxTokens`, `systemPrompt`
@@ -86,13 +92,20 @@ welcome.
 - **NetworkPolicy**: default-deny ingress + egress whitelist (DNS, API server,
   vector stores, external APIs)
 - **PriorityClass** (`kuberag-system`, 1M) on operator + retriever + worker jobs
-- **PodDisruptionBudget** template for Retriever deployments
+- **Managed PodDisruptionBudget** for Retriever deployments and Helm-managed
+  PDB for the operator
+- **Retriever HPA**: optional CPU-based autoscaling with configurable min/max
+  replicas and utilization target
 - **Startup/liveness/readiness probes** on operator and retriever
 - **Topology spread** (zone anti-skew) on retriever
 - **Secured images**: distroless operator, `USER 65532` on worker/retriever,
   readOnlyRootFilesystem, drop ALL capabilities, runtime default seccomp
 - Multi-arch images (amd64, arm64) published to GHCR via release workflow
 - Leader election with coordination.k8s.io leases
+- Namespace-scoped cache/RBAC mode via `WATCH_NAMESPACE` and Helm
+  `rbac.scope=namespace`
+- Per-KB worker ServiceAccount + Role/RoleBinding with temporary,
+  resource-name-scoped ConfigMap access
 
 ### Testing & CI
 - **Go unit tests** for all pure-logic helpers (hashing, auto-tune, chunking,
@@ -116,9 +129,10 @@ welcome.
   covers most cases.
 - **Conversion webhook** — required before introducing `v1beta1` or `v1`. Must
   convert stored objects between API versions without data loss.
-- **Namespace-scoped operator mode** — today the operator is cluster-scoped
-  (ClusterRole); an option restricted to a watch namespace reduces blast radius
-  for multi-tenant clusters.
+- **Multi-namespace scoped Helm mode** — the binary accepts comma-separated
+  `WATCH_NAMESPACE`, while Helm's namespaced Role mode targets one namespace.
+  Multiple tenant namespaces currently require one release per namespace or
+  manually composed RoleBindings.
 
 ### Ingestion improvements
 - **Incremental at file granularity** — today skip is per-source via revision
@@ -141,14 +155,13 @@ welcome.
   compliance, `sitemap.xml` discovery, JavaScript rendering for SPAs.
 
 ### Serving & retrieval
-- **Retriever HPA** — horizontal pod autoscaling on CPU/memory or custom metrics
-  (requests per second, query latency p95). Today replicas are static.
-- **Retriever PDB managed by controller** — the operator should create and own a
-  PodDisruptionBudget for each Retriever instead of requiring a manual template.
+- **Custom-metric Retriever autoscaling** — CPU-based HPA is managed by the
+  operator. Request-rate and query-latency metrics would make scaling more
+  workload-aware than CPU alone.
 - **Streaming generation (SSE)** — server-sent events for token-by-token LLM
   output, giving users progressive answer rendering.
-- **Retriever ingress/route** — optionally create an Ingress or OpenShift Route
-  for the retriever Service, with TLS and auth annotations.
+- **OpenShift Route support** — Kubernetes Ingress with TLS and OIDC is managed
+  by the operator. Native OpenShift Route generation is still not implemented.
 
 ### Evaluation & tuning
 - **Auto-generated eval datasets** — sample questions from ingested chunks
@@ -257,17 +270,10 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   metadata.name` when omitted, `nodeSelector` propagated from a shared
   ConfigMap) are today inlined in the controller, which makes them
   invisible to `kubectl explain`.
-- **Namespace-scope operator mode** — the operator is currently
-  cluster-scoped (`ClusterRole`). Multi-tenant clusters need a
-  `WATCH_NAMESPACE` env var that restricts reconciliation and RBAC to
-  one or more namespaces, with the operator dropping its leader-election
-  ClusterRole when locked down.
-- **Per-KB worker ServiceAccount** — today all workers share a single
-  `kuberag-worker` ServiceAccount in each namespace. A KB can use
-  `spec.ingestion.serviceAccountName` to point at a different SA, but the
-  default is global. In multi-tenant deployments, the per-KB SA should
-  be auto-provisioned and bound to a per-KB RBAC role so one KB cannot
-  touch another's ConfigMaps or Jobs.
+- **Cross-namespace tenant administration** — namespace-scoped mode and
+  per-KB worker identities are available. A centralized multi-namespace
+  installation still needs automated tenant onboarding/offboarding and
+  per-namespace RoleBinding provisioning.
 - **API review against Kubernetes SIG conventions** — before `v1`,
   publish a public API review covering field immutability, default
   semantics, list semantics (`MaxItems` for Sources is 5 and
@@ -283,16 +289,17 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   `github.com`, `qdrant.svc.cluster.local`) and have the operator
   reconcile the egress allowlist automatically. Today the policy is
   cluster-wide and must be hand-edited per environment.
-- **Auth on the retriever** — the FastAPI server has no authentication.
-  Production needs at least an API-key check (header or bearer) and
-  ideally integration with OIDC or an auth-proxy sidecar.
-- **TLS for the retriever** — there is no cert-manager integration; the
-  Service is HTTP-only. Production needs automatic cert provisioning
-  for the retriever (and optionally the operator metrics endpoint).
-- **Rate limiting on `/query`** — the FastAPI server has no per-client
-  rate limit. With LLM-backed generation on the hot path, a single
-  client can exhaust worker / GPU budget. Need per-token buckets with
-  429 responses.
+- **Fine-grained authorization policy** — generic OIDC login and group/email
+  restrictions are available through the managed oauth2-proxy sidecar.
+  Per-route/per-document authorization and policy engines such as OPA remain
+  external.
+- **Operator metrics TLS/auth** — Retriever traffic can use managed
+  Ingress/cert-manager TLS, but the operator metrics endpoint is still plain
+  HTTP and should be isolated or protected by the platform.
+- **Distributed rate limiting** — each Retriever pod now has a bounded
+  per-client token bucket with 429/`Retry-After`, plus concurrency and body
+  limits. A shared Redis-backed limiter is still needed when strict quotas must
+  span all replicas.
 - **Dependency pinning policy** — `setuptools==80.10.2` is pinned because
   pymilvus breaks on 81+. That pin carries known CVEs (currently
   accepted via `pip-audit || true` in CI). Production should either
@@ -357,9 +364,8 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   truth, but there's no documented procedure for rebuilding from
   scratch. Need a `kuberag backup` / `restore` workflow that exports
   collection state to object storage and re-ingests on demand.
-- **Worker ServiceAccount isolation** — see "API maturity". A
-  compromised KB should not be able to delete another KB's
-  ConfigMap or IngestionRun.
+- **Worker network identity** — Kubernetes API access is isolated per KB, but
+  network egress is still shared unless per-KB NetworkPolicies are configured.
 
 ### Testing gaps
 
@@ -410,15 +416,13 @@ features; they are about confidence in what's already built.
   covers Python; Go's `stdlib` and `k8s.io/*` dependencies are
   not scanned. `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
   is a single CI step.
-- **SBOM / provenance** — no SLSA 3 provenance attestation for
-  the three published images. Supply-chain security today is:
-  "we published the image from a GitHub Actions runner." For
-  production, add `docker build --provenance=true --sbom=true`,
-  sign with `cosign`, and publish an SBOM alongside releases.
-- **Operator PodDisruptionBudget** — the Retriever Deployment
-  has a PDB template; the operator Deployment does not. A
-  cluster drain during an ingest could kill the operator's
-  leader pod mid-reconcile without a PDB to protect it.
+- **Image signing and policy enforcement** — release builds now publish
+  BuildKit SBOM and maximum-mode provenance attestations for all three images.
+  Keyless `cosign` signing and a cluster admission policy that rejects unsigned
+  images are still required for end-to-end supply-chain enforcement.
+- **Operator HA validation** — the Helm chart now installs an operator PDB and
+  leader election is enabled, but multi-replica leader handoff still needs an
+  end-to-end test before claiming highly available operation.
 - **Pod Security Standards** — `restricted` profile
   compatibility is not verified. The Pod spec uses
   `securityContext` drops and `readOnlyRootFilesystem` but

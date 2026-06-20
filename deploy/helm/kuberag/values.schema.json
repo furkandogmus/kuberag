@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "create": {"type": "boolean"},
+        "scope": {"type": "string", "enum": ["cluster", "namespace"]},
+        "watchNamespace": {"type": "string"}
+      }
+    }
+  }
+}

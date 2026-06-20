@@ -6,40 +6,40 @@ import (
 )
 
 var (
-	// ingestionsTotal counts ingestion Job outcomes per KnowledgeBase.
+	// ingestionsTotal counts ingestion Job outcomes per namespace.
 	ingestionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "rag_knowledgebase_ingestions_total",
 			Help: "Total ingestion jobs completed, partitioned by result.",
 		},
-		[]string{"knowledgebase", "result"},
+		[]string{"namespace", "result"},
 	)
 
-	// indexedChunks reports the current chunk count per KnowledgeBase.
+	// indexedChunks reports the current chunk count per namespace.
 	indexedChunks = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "rag_knowledgebase_indexed_chunks",
 			Help: "Number of chunks currently indexed.",
 		},
-		[]string{"knowledgebase"},
+		[]string{"namespace"},
 	)
 
-	// retrievalRecall reports the last measured recall percentage per KnowledgeBase.
+	// retrievalRecall reports the last measured recall percentage per namespace.
 	retrievalRecall = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "rag_knowledgebase_recall_percent",
 			Help: "Last measured retrieval recall@k as a percentage.",
 		},
-		[]string{"knowledgebase"},
+		[]string{"namespace"},
 	)
 
-	// autoTuneAttempts reports auto-tune iterations applied per KnowledgeBase.
+	// autoTuneAttempts reports auto-tune iterations applied per namespace.
 	autoTuneAttempts = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "rag_knowledgebase_autotune_attempts",
 			Help: "Number of auto-tune iterations applied.",
 		},
-		[]string{"knowledgebase"},
+		[]string{"namespace"},
 	)
 
 	// autoTuneBestRecall reports the best recall observed across auto-tune attempts.
@@ -48,21 +48,18 @@ var (
 			Name: "rag_knowledgebase_autotune_best_recall_percent",
 			Help: "Best retrieval recall@k observed across auto-tune attempts.",
 		},
-		[]string{"knowledgebase"},
+		[]string{"namespace"},
 	)
 
 	// autoTuneDurationSeconds tracks the wall-clock duration of each
 	// completed auto-tune run, per result (converged, exhausted, reset).
-	// Use it as a histogram to build SLO panels like "p95 auto-tune
-	// convergence time" and to alert when a run exceeds expected
-	// duration.
 	autoTuneDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "rag_knowledgebase_autotune_duration_seconds",
 			Help:    "Duration of auto-tune runs (start to settle/reset), per result.",
-			Buckets: prometheus.ExponentialBuckets(30, 2, 12), // 30s .. ~17h
+			Buckets: prometheus.ExponentialBuckets(30, 2, 12),
 		},
-		[]string{"knowledgebase", "result"},
+		[]string{"namespace", "result"},
 	)
 )
 

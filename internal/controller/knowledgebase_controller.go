@@ -4,8 +4,12 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +50,8 @@ type KnowledgeBaseReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives the actual knowledge state toward the desired spec.
 func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -55,6 +61,14 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, &kb); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	tracer := otel.Tracer("kuberag")
+	ctx, span := tracer.Start(ctx, "KnowledgeBase.Reconcile",
+		trace.WithAttributes(
+			attribute.String("kb.name", kb.Name),
+			attribute.String("kb.namespace", kb.Namespace),
+		))
+	defer span.End()
 
 	// Deletion path.
 	if !kb.DeletionTimestamp.IsZero() {
@@ -69,8 +83,43 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	if err := r.validateCustomWorkerServiceAccount(ctx, &kb); err != nil {
+		kb.Status.Phase = ragv1alpha1.PhasePending
+		setCondition(&kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+			"WorkerServiceAccountUnavailable", err.Error())
+		if updateErr := r.statusUpdate(ctx, &kb); updateErr != nil {
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if err := r.ensureWorkerIdentity(ctx, &kb); err != nil {
+		if isQuotaExceeded(err) {
+			kb.Status.Phase = ragv1alpha1.PhasePending
+			setCondition(&kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create worker identity: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, &kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(&kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating worker ServiceAccount/Role/RoleBinding")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
 	// Keep an owned VectorIndex in sync with the store/model.
 	if err := r.ensureVectorIndex(ctx, &kb); err != nil {
+		if isQuotaExceeded(err) {
+			kb.Status.Phase = ragv1alpha1.PhasePending
+			setCondition(&kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
+				"ResourceQuotaExceeded", "cannot create VectorIndex: resource quota exceeded")
+			if updateErr := r.statusUpdate(ctx, &kb); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			r.event(&kb, corev1.EventTypeWarning, "ResourceQuotaExceeded",
+				"resource quota prevents creating VectorIndex")
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -124,6 +173,7 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				r.event(&kb, corev1.EventTypeNormal, "IngestionCancelled",
 					"spec or secrets changed; cancelling in-flight ingest %s", active.Name)
 				_ = r.Delete(ctx, &active, client.PropagationPolicy(metav1.DeletePropagationBackground))
+				r.clearWorkerConfigMapAccess(ctx, &kb)
 				kb.Status.ActiveJob = ""
 				kb.Status.ActiveJobStartedAt = nil
 				if err := r.statusUpdate(ctx, &kb); err != nil {
@@ -139,6 +189,8 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				r.event(&kb, corev1.EventTypeWarning, "IngestionStuck",
 					"active job %s has been running past ActiveDeadlineSeconds; clearing and retrying", active.Name)
 				_ = r.Delete(ctx, &active, client.PropagationPolicy(metav1.DeletePropagationBackground))
+				kb.Status.LastCheckpoint = r.readCheckpointResult(ctx, kb.Namespace, active.Name)
+				r.clearWorkerConfigMapAccess(ctx, &kb)
 				kb.Status.ActiveJob = ""
 				kb.Status.ActiveJobStartedAt = nil
 				kb.Status.LastFailedSpecHash = chash
@@ -229,6 +281,34 @@ func (r *KnowledgeBaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&ragv1alpha1.KnowledgeBase{}).
 		Owns(&batchv1.Job{}).
 		Owns(&ragv1alpha1.VectorIndex{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
+		Watches(
+			&corev1.ServiceAccount{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				sa, ok := obj.(*corev1.ServiceAccount)
+				if !ok {
+					return nil
+				}
+				var list ragv1alpha1.KnowledgeBaseList
+				if err := r.List(ctx, &list, client.InNamespace(sa.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []reconcile.Request
+				for _, kb := range list.Items {
+					if kb.Spec.Ingestion.ServiceAccountName == sa.Name {
+						reqs = append(reqs, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Namespace: kb.Namespace,
+								Name:      kb.Name,
+							},
+						})
+					}
+				}
+				return reqs
+			}),
+		).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {

@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,6 +25,45 @@ import (
 
 	ragv1alpha1 "github.com/furkandogmus/kuberag/api/v1alpha1"
 )
+
+var (
+	probeCacheMu sync.RWMutex
+	probeCache   = map[string]probeCacheEntry{} // key: store type + endpoint
+)
+
+type probeCacheEntry struct {
+	health    ragv1alpha1.VectorIndexHealth
+	points    int64
+	dim       int
+	message   string
+	checkedAt time.Time
+}
+
+func cachedProbe(storeType, endpoint, collection string, probeFn func() probeResult) probeResult {
+	key := fmt.Sprintf("%s|%s|%s", storeType, endpoint, collection)
+	probeCacheMu.RLock()
+	entry, ok := probeCache[key]
+	probeCacheMu.RUnlock()
+	if ok && time.Since(entry.checkedAt) < 30*time.Second {
+		return probeResult{
+			health:    entry.health,
+			points:    entry.points,
+			dimension: entry.dim,
+			message:   entry.message,
+		}
+	}
+	res := probeFn()
+	probeCacheMu.Lock()
+	probeCache[key] = probeCacheEntry{
+		health:    res.health,
+		points:    res.points,
+		dim:       res.dimension,
+		message:   res.message,
+		checkedAt: time.Now(),
+	}
+	probeCacheMu.Unlock()
+	return res
+}
 
 // VectorIndexReconciler probes the health of a vector store collection.
 type VectorIndexReconciler struct {
@@ -39,7 +82,29 @@ func (r *VectorIndexReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	probe := r.probe(ctx, &vi)
+	tracer := otel.Tracer("kuberag")
+	ctx, span := tracer.Start(ctx, "VectorIndex.Reconcile",
+		trace.WithAttributes(
+			attribute.String("vi.name", vi.Name),
+			attribute.String("vi.namespace", vi.Namespace),
+		))
+	defer span.End()
+
+	storeType := string(vi.Spec.Store.Type)
+	endpoint := vi.Spec.Store.Endpoint
+	collection := vi.Spec.Store.Collection
+	if collection == "" {
+		collection = vi.Spec.KnowledgeBaseRef.Name
+	}
+
+	probe := cachedProbe(storeType, endpoint, collection, func() probeResult {
+		return r.probeStore(ctx, &vi)
+	})
+
+	if probe.health == ragv1alpha1.IndexHealthy && probe.points == 0 && vi.Spec.Dimension > 0 {
+		probe.health = ragv1alpha1.IndexDegraded
+		probe.message = "collection exists with 0 points (ingestion may have failed or not yet run)"
+	}
 
 	vi.Status.ObservedGeneration = vi.Generation
 	vi.Status.Health = probe.health
@@ -77,17 +142,6 @@ type probeResult struct {
 	points    int64
 	dimension int
 	message   string
-}
-
-func (r *VectorIndexReconciler) probe(ctx context.Context, vi *ragv1alpha1.VectorIndex) probeResult {
-	res := r.probeStore(ctx, vi)
-	// A configured collection with zero points is Degraded (either never
-	// ingested or wiped by a failed ingestion), not Healthy.
-	if res.health == ragv1alpha1.IndexHealthy && res.points == 0 && vi.Spec.Dimension > 0 {
-		res.health = ragv1alpha1.IndexDegraded
-		res.message = "collection exists with 0 points (ingestion may have failed or not yet run)"
-	}
-	return res
 }
 
 func (r *VectorIndexReconciler) probeStore(ctx context.Context, vi *ragv1alpha1.VectorIndex) probeResult {

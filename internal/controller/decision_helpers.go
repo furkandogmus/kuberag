@@ -11,6 +11,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -93,6 +94,9 @@ func userEditedSpec(kb *ragv1alpha1.KnowledgeBase, desiredHash string) bool {
 
 // needsIngest decides whether the store is stale relative to the spec.
 func needsIngest(kb *ragv1alpha1.KnowledgeBase, desiredHash string) (reason string, need bool) {
+	if kb.Status.DeferCronIngest && kb.Status.ActiveJob == "" {
+		return "deferred cron ingestion", true
+	}
 	if kb.Status.PendingRetune {
 		return "auto-tune re-index", true
 	}
@@ -226,10 +230,10 @@ func autoTuneMax(rq *ragv1alpha1.RetrievalQualitySpec) int {
 	return rq.AutoTune.MaxAttempts
 }
 
-func toSourceStatus(in []IngestSourceResult) []ragv1alpha1.SourceStatus {
+func toSourceStatus(in []ragv1alpha1.IngestSourceResult) []ragv1alpha1.SourceStatus {
 	out := make([]ragv1alpha1.SourceStatus, 0, len(in))
 	for _, s := range in {
-		out = append(out, ragv1alpha1.SourceStatus{Name: s.Name, Revision: s.Revision, Chunks: s.Chunks})
+		out = append(out, ragv1alpha1.SourceStatus(s))
 	}
 	return out
 }
@@ -244,7 +248,7 @@ func recordAutoTuneDuration(kb *ragv1alpha1.KnowledgeBase, result string, now ti
 	}
 	dur := now.Sub(kb.Status.AutoTuneStartedAt.Time).Seconds()
 	if dur > 0 {
-		autoTuneDurationSeconds.WithLabelValues(kb.Name, result).Observe(dur)
+		autoTuneDurationSeconds.WithLabelValues(kb.Namespace, result).Observe(dur)
 	}
 	kb.Status.AutoTuneStartedAt = nil
 }
@@ -355,6 +359,15 @@ func setCondition(kb *ragv1alpha1.KnowledgeBase, condType string, status metav1.
 		Message:            msg,
 		ObservedGeneration: kb.Generation,
 	})
+}
+
+func isQuotaExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	return apierrors.IsForbidden(err) &&
+		(strings.Contains(err.Error(), "exceeded quota") ||
+			strings.Contains(err.Error(), "exceeded limitrange"))
 }
 
 func (r *KnowledgeBaseReconciler) computeSecretsHash(ctx context.Context, kb *ragv1alpha1.KnowledgeBase) string {

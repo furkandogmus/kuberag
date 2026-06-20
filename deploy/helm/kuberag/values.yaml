@@ -53,19 +53,25 @@ networkPolicy:
 # RBAC configuration.
 rbac:
   create: true
+  # cluster: watch all namespaces with ClusterRole/ClusterRoleBinding.
+  # namespace: watch one namespace with Role/RoleBinding.
+  scope: cluster
+  # Defaults to the Helm release namespace when scope=namespace.
+  watchNamespace: ""
 
 serviceAccount:
   create: true
   name: kuberag-controller-manager
 
-# Worker ServiceAccount/RBAC is installed in each namespace that hosts
-# KnowledgeBases. Add workload namespaces here.
+# Legacy shared Worker ServiceAccount/RBAC. Disabled by default because the
+# operator now creates a least-privilege ServiceAccount per KnowledgeBase.
+# Enable only for KnowledgeBases that explicitly set serviceAccountName below.
 worker:
   serviceAccountName: kuberag-worker
   namespaces:
     - default
   rbac:
-    create: true
+    create: false
 
 # Pod security context.
 podSecurityContext:
@@ -78,11 +84,14 @@ podSecurityContext:
 
 # Container security context.
 securityContext:
+  runAsNonRoot: true
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
   capabilities:
     drop:
       - ALL
+  seccompProfile:
+    type: RuntimeDefault
 
 # Pod annotations and labels.
 podAnnotations: {}
@@ -95,3 +104,8 @@ affinity: {}
 
 # Termination grace period.
 terminationGracePeriodSeconds: 60
+
+# Protect the operator leader from voluntary disruption during node drains.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

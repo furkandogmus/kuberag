@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -46,6 +47,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -58,10 +71,37 @@ rules:
   - update
   - watch
 - apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - rag.furkan.dev
   resources:
+  - backups
   - ingestionruns
   - knowledgebases
+  - restores
   - retrievers
   - vectorindices
   verbs:
@@ -75,8 +115,18 @@ rules:
 - apiGroups:
   - rag.furkan.dev
   resources:
+  - backups/finalizers
+  - knowledgebases/finalizers
+  - restores/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - rag.furkan.dev
+  resources:
+  - backups/status
   - ingestionruns/status
   - knowledgebases/status
+  - restores/status
   - retrievers/status
   - vectorindices/status
   verbs:
@@ -84,8 +134,15 @@ rules:
   - patch
   - update
 - apiGroups:
-  - rag.furkan.dev
+  - rbac.authorization.k8s.io
   resources:
-  - knowledgebases/finalizers
+  - rolebindings
+  - roles
   verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
   - update
+  - watch

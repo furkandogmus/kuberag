@@ -258,7 +258,9 @@ type IngestionSpec struct {
 	// Resources for the ingestion worker pod.
 	// +optional
 	Resources *ResourceRequirements `json:"resources,omitempty"`
-	// ServiceAccountName runs the ingestion Job under a specific SA (e.g. for IRSA).
+	// ServiceAccountName runs worker Jobs under an existing ServiceAccount (e.g.
+	// for IRSA). When omitted, the operator creates a dedicated per-KnowledgeBase
+	// ServiceAccount and least-privilege Role/RoleBinding.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 	// NodeSelector is a selector which must be true for the pod to fit on a node.
@@ -397,6 +399,14 @@ type SourceStatus struct {
 	Chunks int `json:"chunks,omitempty"`
 }
 
+// IngestSourceResult records per-source sync output for incremental tracking.
+// Used both by the worker result JSON and as the checkpoint/resume state.
+type IngestSourceResult struct {
+	Name     string `json:"name"`
+	Revision string `json:"revision"`
+	Chunks   int    `json:"chunks"`
+}
+
 // EvaluationStatus records the most recent retrieval-quality run.
 type EvaluationStatus struct {
 	// +optional
@@ -477,6 +487,12 @@ type KnowledgeBaseStatus struct {
 	// IndexedChunks is the total number of chunks in the store after the last run.
 	// +optional
 	IndexedChunks int `json:"indexedChunks,omitempty"`
+	// LastCheckpoint records the per-source progress from the last failed
+	// ingestion's checkpoint, enabling the next attempt to resume rather
+	// than restart from scratch.
+	// +optional
+	LastCheckpoint []IngestSourceResult `json:"lastCheckpoint,omitempty"`
+
 	// +optional
 	Sources []SourceStatus `json:"sources,omitempty"`
 	// +optional
@@ -494,6 +510,11 @@ type KnowledgeBaseStatus struct {
 	// collide with a still-present finished Job.
 	// +optional
 	IngestRound int `json:"ingestRound,omitempty"`
+	// DeferCronIngest is set when a freshness cron fires while an ActiveJob is
+	// already running. When the current Job completes the operator starts a
+	// deferred ingestion instead of silently dropping the cron tick.
+	// +optional
+	DeferCronIngest bool `json:"deferCronIngest,omitempty"`
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge

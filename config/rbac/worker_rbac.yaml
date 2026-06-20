@@ -1,4 +1,7 @@
-# ServiceAccount + RBAC for ingestion/eval/cleanup Jobs.
+# Legacy shared ServiceAccount + RBAC for ingestion/eval/cleanup Jobs.
+# The operator now creates a least-privilege ServiceAccount per KnowledgeBase
+# by default. Use this only when spec.ingestion.serviceAccountName explicitly
+# references kuberag-worker.
 #
 # Apply in every namespace where you create KnowledgeBases:
 #   kubectl apply -f config/rbac/worker_rbac.yaml -n <namespace>

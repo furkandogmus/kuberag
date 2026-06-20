@@ -1124,8 +1124,10 @@ spec:
                         type: string
                     type: object
                   serviceAccountName:
-                    description: ServiceAccountName runs the ingestion Job under a
-                      specific SA (e.g. for IRSA).
+                    description: |-
+                      ServiceAccountName runs worker Jobs under an existing ServiceAccount (e.g.
+                      for IRSA). When omitted, the operator creates a dedicated per-KnowledgeBase
+                      ServiceAccount and least-privilege Role/RoleBinding.
                     type: string
                   tolerations:
                     description: Tolerations allows the pod to tolerate node taints.

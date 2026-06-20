@@ -14,6 +14,22 @@ recommend running kuberag in production with sensitive data** until:
   version that supports 81+ or by adopting a `pymilvus` release that
   doesn't need the pin).
 
+## Image integrity
+
+All container images published to `ghcr.io` are signed with
+[cosign](https://github.com/sigstore/cosign) keyless signing using the
+GitHub Actions OIDC identity and the public
+[Fulcio](https://fulcio.sigstore.dev/) CA. You can verify any image with:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/furkandogmus/kuberag/.github/workflows/release.yaml@refs/[^/]+/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/furkandogmus/kuberag:<tag>
+```
+
+Substitute `<tag>` with the desired version tag or `latest`.
+
 ## Supported versions
 
 | Version | Supported | Notes |

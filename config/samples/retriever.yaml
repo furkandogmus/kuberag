@@ -6,6 +6,40 @@ metadata:
 spec:
   knowledgeBaseRef:
     name: company-docs
+  # Protect every endpoint except /healthz. Create with:
+  # kubectl create secret generic company-docs-retriever-auth \
+  #   --from-literal=apiKey='replace-with-a-long-random-value'
+  # apiKeySecretRef:
+  #   name: company-docs-retriever-auth
+  #   key: apiKey
+  rateLimit:
+    enabled: true
+    requestsPerMinute: 120
+    burst: 30
+  maxConcurrentRequests: 32
+  maxRequestBodyBytes: 1048576
+  podDisruptionBudget: true
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  # Optional public TLS endpoint. cert-manager provisions the TLS Secret when
+  # the named ClusterIssuer exists.
+  # ingress:
+  #   host: rag.example.com
+  #   className: nginx
+  #   tlsSecretName: rag-example-tls
+  #   clusterIssuer: letsencrypt-prod
+  # Optional OIDC login through an oauth2-proxy sidecar. Requires ingress and
+  # cannot be combined with apiKeySecretRef.
+  # oidc:
+  #   issuerURL: https://id.example.com/realms/company
+  #   clientIDSecretRef: { name: retriever-oidc, key: clientID }
+  #   clientSecretSecretRef: { name: retriever-oidc, key: clientSecret }
+  #   cookieSecretRef: { name: retriever-oidc, key: cookieSecret }
+  #   emailDomains: [example.com]
+  #   groups: [rag-users]
   topK: 8
   scoreThresholdPercent: 20
   replicas: 2
@@ -14,4 +48,7 @@ spec:
     model: Xenova/ms-marco-MiniLM-L-6-v2
 # Query it once Available:
 #   kubectl port-forward svc/company-docs-retriever 8000:8000
-#   curl -s localhost:8000/query -d '{"query":"how do I create a collection?"}' | jq
+#   curl -s localhost:8000/query -H 'Content-Type: application/json' \
+#     -d '{"query":"how do I create a collection?"}' | jq
+# When apiKeySecretRef is enabled, also pass:
+#   -H "Authorization: Bearer $(kubectl get secret company-docs-retriever-auth -o jsonpath='{.data.apiKey}' | base64 -d)"

@@ -29,7 +29,7 @@ func (r *KnowledgeBaseReconciler) reconcileDelete(ctx context.Context, kb *ragv1
 	switch {
 	case apierrors.IsNotFound(err):
 		secretsHash := r.computeSecretsHash(ctx, kb)
-		cj, specJSON, berr := buildCleanupJob(kb, secretsHash)
+		cj, specJSON, berr := buildCleanupJob(ctx, kb, secretsHash)
 		if berr != nil {
 			return ctrl.Result{}, berr
 		}

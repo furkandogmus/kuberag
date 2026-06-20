@@ -68,7 +68,7 @@ Required top-level: `embedding, sources, vectorStore`
 - **`ingestion.resources`** `object` (optional) — Resources for the ingestion worker pod.
 - **`ingestion.resources.cpu`** `string` (optional)
 - **`ingestion.resources.memory`** `string` (optional)
-- **`ingestion.serviceAccountName`** `string` (optional) — ServiceAccountName runs the ingestion Job under a specific SA (e.g. for IRSA).
+- **`ingestion.serviceAccountName`** `string` (optional) — ServiceAccountName runs worker Jobs under an existing ServiceAccount (e.g. for IRSA). When omitted, the operator creates a dedicated per-KnowledgeBase ServiceAccount and least-privilege Role/RoleBinding.
 - **`ingestion.tolerations`** `array(object)` (optional) — Tolerations allows the pod to tolerate node taints.
 - **`ingestion.ttlSecondsAfterFinished`** `integer` (optional) — TTLSecondsAfterFinished limits the lifetime of completed ingestion/eval Jobs. After this duration the Job and its result ConfigMap are garbage collected by the cluster. Defaults to 300 (5 minutes). Productions environments may want 86400 (24h) for audit trails. · `minimum=0`, `format=int32`
 - **`retrievalQuality`** `object` (optional) — RetrievalQualitySpec enables periodic evaluation and optional auto-tuning.
@@ -168,6 +168,14 @@ Required top-level: `knowledgeBaseRef`
 - **`affinity.podAntiAffinity`** `object` (optional) — Describes pod anti-affinity scheduling rules (e.g. avoid putting this pod in the same node, zone, etc. as some other pod(s)).
 - **`affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution`** `array(object)` (optional) — The scheduler will prefer to schedule pods to nodes that satisfy the anti-affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling anti-affinity expressions, etc.), compute a sum by iterating through the elements of this field and subtracting "weight" from the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred.
 - **`affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution`** `array(object)` (optional) — If the anti-affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the anti-affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied.
+- **`apiKeySecretRef`** `object` (optional) — APIKeySecretRef enables API-key authentication for the retriever. The referenced Secret value is accepted as either an Authorization Bearer token or an X-API-Key header. Health probes remain unauthenticated.
+- **`apiKeySecretRef.key`** `string` (optional)
+- **`apiKeySecretRef.name`** `string` (optional)
+- **`autoscaling`** `object` (optional) — Autoscaling optionally creates a CPU-based HPA.
+- **`autoscaling.enabled`** `boolean` (optional) — Enabled creates and manages an HPA for the Retriever Deployment.
+- **`autoscaling.maxReplicas`** `integer` (optional) — MaxReplicas is the upper replica bound. · `minimum=1`, `format=int32`
+- **`autoscaling.minReplicas`** `integer` (optional) — MinReplicas is the lower replica bound. · `minimum=1`, `format=int32`
+- **`autoscaling.targetCPUUtilizationPercentage`** `integer` (optional) — TargetCPUUtilizationPercentage is the average CPU utilization target. · `minimum=1`, `maximum=100`, `format=int32`
 - **`generation`** `object` (optional) — Generation, when set, enables LLM answer synthesis over retrieved chunks.
 - **`generation.apiKeySecretRef`** `object` (optional) — APIKeySecretRef holds the chat provider API key. Optional for local OpenAI-compatible servers (Ollama, vLLM, LM Studio) that need no auth.
 - **`generation.apiKeySecretRef.key`** `string` (optional)
@@ -181,9 +189,37 @@ Required top-level: `knowledgeBaseRef`
 - **`hybrid`** `boolean` (optional) — Hybrid enables hybrid retrieval (dense vector + lexical search fused with Reciprocal Rank Fusion) by default for every query. Individual requests can still override it via the `hybrid` field on /query. Best when exact keywords/identifiers matter as much as semantic similarity.
 - **`hybridDensePercent`** `integer` (optional) — HybridDensePercent weights dense (vector) vs lexical search when fusing hybrid results with RRF: the dense contribution is scaled by this percent and the lexical by the remainder (e.g. 70 => 0.7 dense / 0.3 lexical). Only applies when hybrid retrieval is active. Unset = 50 (equal weighting); 0 = pure lexical, 100 = pure dense. · `minimum=0`, `maximum=100`
 - **`image`** `string` (optional) — Image overrides the retriever server image.
+- **`ingress`** `object` (optional) — Ingress optionally exposes the Retriever outside the cluster.
+- **`ingress.annotations`** `object` (optional) — Annotations are copied to the managed Ingress.
+- **`ingress.className`** `string` (optional) — ClassName selects the Ingress controller.
+- **`ingress.clusterIssuer`** `string` (optional) — ClusterIssuer adds the cert-manager.io/cluster-issuer annotation.
+- **`ingress.host`** `string` (optional) — Host is the public DNS name routed to the Retriever. · `minLength=1`
+- **`ingress.path`** `string` (optional) — Path is the URL path prefix. · `pattern=^/`
+- **`ingress.tlsSecretName`** `string` (optional) — TLSSecretName enables TLS using this Secret. The Secret may be provisioned by cert-manager when ClusterIssuer is set.
 - **`knowledgeBaseRef`** `object` — KnowledgeBaseRef names the KnowledgeBase to serve from (same namespace).
 - **`knowledgeBaseRef.name`** `string` (optional)
+- **`maxConcurrentRequests`** `integer` (optional) — MaxConcurrentRequests caps in-flight non-health requests per pod. Excess requests receive 503 with Retry-After instead of exhausting the process. · `minimum=1`, `maximum=10000`
+- **`maxRequestBodyBytes`** `integer` (optional) — MaxRequestBodyBytes rejects oversized request bodies before parsing. · `minimum=1024`, `maximum=104857600`, `format=int64`
 - **`nodeSelector`** `object` (optional) — NodeSelector is a selector which must be true for the pod to fit on a node.
+- **`oidc`** `object` (optional) — OIDC enables an oauth2-proxy sidecar. Ingress is required and native apiKeySecretRef authentication must not be enabled at the same time.
+- **`oidc.clientIDSecretRef`** `object` (optional) — ClientIDSecretRef contains the OIDC client ID.
+- **`oidc.clientIDSecretRef.key`** `string` (optional)
+- **`oidc.clientIDSecretRef.name`** `string` (optional)
+- **`oidc.clientSecretSecretRef`** `object` (optional) — ClientSecretSecretRef contains the OIDC client secret.
+- **`oidc.clientSecretSecretRef.key`** `string` (optional)
+- **`oidc.clientSecretSecretRef.name`** `string` (optional)
+- **`oidc.cookieSecretRef`** `object` (optional) — CookieSecretRef contains an oauth2-proxy cookie secret. Use 16, 24, or 32 random bytes encoded as base64url.
+- **`oidc.cookieSecretRef.key`** `string` (optional)
+- **`oidc.cookieSecretRef.name`** `string` (optional)
+- **`oidc.emailDomains`** `array(string)` (optional) — EmailDomains restricts login to these domains. Empty defaults to "*".
+- **`oidc.groups`** `array(string)` (optional) — Groups restricts login to users with at least one matching OIDC group.
+- **`oidc.image`** `string` (optional) — Image overrides the oauth2-proxy image.
+- **`oidc.issuerURL`** `string` (optional) — IssuerURL is the OpenID Connect issuer discovery URL. · `pattern=^https://`
+- **`podDisruptionBudget`** `boolean` (optional) — PodDisruptionBudget controls whether the operator maintains a PDB for this Retriever. Enabled by default when replicas is greater than one.
+- **`rateLimit`** `object` (optional) — RateLimit enables per-client request throttling. Omit to disable.
+- **`rateLimit.burst`** `integer` (optional) — Burst is the maximum number of immediately available request tokens. · `minimum=1`, `maximum=10000`
+- **`rateLimit.enabled`** `boolean` (optional) — Enabled turns rate limiting on. When disabled, RequestsPerMinute and Burst are ignored.
+- **`rateLimit.requestsPerMinute`** `integer` (optional) — RequestsPerMinute is the sustained request rate allowed per client IP. · `minimum=1`, `maximum=100000`
 - **`replicas`** `integer` (optional) — Replicas of the retriever server. · `minimum=0`, `format=int32`
 - **`rerank`** `object` (optional) — RerankSpec configures optional cross-encoder reranking of retrieved chunks.
 - **`rerank.candidatePoolSize`** `integer` (optional) — CandidatePoolSize is how many candidates to retrieve before reranking; the reranker then returns the top `topK`. A larger pool gives the reranker more to work with (better quality) at the cost of latency. 0 means auto (max(4×topK, 20)). · `minimum=0`
@@ -202,6 +238,7 @@ Required top-level: `knowledgeBaseRef`
 - **`conditions`** `array(object)` (optional)
 - **`observedGeneration`** `integer` (optional) · `format=int64`
 - **`phase`** `string` (optional) · enum: `Pending, Available, Progressing`
+- **`publicEndpoint`** `string` (optional) — PublicEndpoint is the managed Ingress URL, when configured.
 - **`readyReplicas`** `integer` (optional) · `format=int32`
 - **`serviceEndpoint`** `string` (optional) — ServiceEndpoint is the in-cluster URL of the retriever, when available.
 

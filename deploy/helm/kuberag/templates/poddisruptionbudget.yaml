@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kuberag.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kuberag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller-manager
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kuberag.selectorLabels" . | nindent 6 }}
+{{- end }}

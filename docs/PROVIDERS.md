@@ -141,6 +141,42 @@ generation:
 
 Every secret is referenced, never inlined: `tokenSecretRef`,
 `accessKeySecretRef`/`secretKeySecretRef`, `embedding.apiKeySecretRef`,
-`vectorStore.credentialsSecretRef`, `generation.apiKeySecretRef`. The operator
-injects them into worker/retriever pods as env from the named `Secret` keys.
+`vectorStore.credentialsSecretRef`, `generation.apiKeySecretRef`, and
+`Retriever.spec.apiKeySecretRef`. The operator injects them into
+worker/retriever pods as env from the named `Secret` keys.
+
+## Retriever API authentication
+
+Set `Retriever.spec.apiKeySecretRef` to require authentication on every
+retriever endpoint except `/healthz`. Clients may send the Secret value as
+either `Authorization: Bearer <key>` or `X-API-Key: <key>`. Rotating the Secret
+automatically rolls out the Retriever Deployment.
+
+### Runtime protection
+
+`Retriever.spec.rateLimit` enables a bounded, per-pod token bucket keyed by the
+direct client IP. `maxConcurrentRequests` rejects excess in-flight work with
+503, and `maxRequestBodyBytes` rejects oversized bodies with 413, including
+chunked requests. Health probes bypass these guards.
+
+For strict quotas across multiple replicas, put a distributed gateway or
+Redis-backed rate limiter in front of the Service; the built-in limiter is
+deliberately local to each pod and does not trust `X-Forwarded-For`.
+
+### Ingress, TLS, and OIDC
+
+`Retriever.spec.ingress` creates a Kubernetes Ingress for one host. Set
+`tlsSecretName` for HTTPS and `clusterIssuer` to add the standard cert-manager
+ClusterIssuer annotation. The cluster must already have an Ingress controller,
+DNS, cert-manager, and the named issuer.
+
+`Retriever.spec.oidc` adds an oauth2-proxy sidecar and changes the Service to
+target that proxy. The client ID, client secret, and cookie secret are read from
+Kubernetes Secrets; missing or empty values keep the Retriever `Pending`.
+The controller also installs an ingress NetworkPolicy that exposes only the
+proxy port, preventing direct in-cluster access to the unauthenticated upstream.
+OIDC requires Ingress and cannot be combined with native `apiKeySecretRef`
+because both would otherwise authenticate the same upstream request
+independently.
+
 Scope each Secret to least privilege.
