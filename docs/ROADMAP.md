@@ -361,6 +361,99 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   compromised KB should not be able to delete another KB's
   ConfigMap or IngestionRun.
 
+### Testing gaps
+
+Items that the existing test pyramid (unit / envtest integration /
+Python mock / k3d e2e) does not cover. These are not about new
+features; they are about confidence in what's already built.
+
+- **Helm chart test** — no `helm lint` or `helm unittest` in CI.
+  A chart template regression (e.g. a broken `_helpers.tpl`) is
+  invisible until someone tries to deploy.
+- **Upgrade test** — a KB created with v0.3 must survive a
+  v0.3 → v0.4 upgrade (CRD schema migration, stored-version
+  change, controller rolling update mid-reconcile). Today no
+  such test exists; only green-field installs are exercised.
+- **Multi-replica operator** — leader election is wired up but
+  no integration or e2e test runs with `replicas > 1`. A
+  leader-handoff mid-ingestion has never been validated.
+- **pgvector e2e** — the k3d e2e test only deploys Qdrant.
+  pgvector (and Milvus) are not exercised end-to-end.
+- **Auto-tune e2e assertion** — the e2e test waits for
+  `Phase=Ready` but does not assert that the recall target
+  was met or that `AutoTuneAttempts` stabilised at a
+  reasonable value. An auto-tune loop could silently regress
+  without the e2e catching it.
+- **Secret rotation e2e** — rotate a referenced `Secret` and
+  assert `ObservedSpecHash` is unchanged. Currently only a
+  unit-level test covers this.
+- **Multi-source e2e** — GitHub + S3 + Web sources in the
+  same `KnowledgeBase`. The e2e only indexes one GitHub repo.
+  Source-index cross-talk (e.g. S3 key mangles GitHub
+  revision) is untested.
+- **Chaos test** — kill the operator mid-ingestion /
+  mid-eval / mid-cleanup and assert the cluster converges
+  to the expected state. Validates finalizer safety,
+  `ActiveJob` recovery, and the stale-Job detection timer.
+- **Multi-arch e2e** — arm64 worker/retriever images are
+  built and published but never tested on arm64 hardware or
+  emulation.
+- **Air-gapped test** — run the worker without internet
+  access (model already cached, sources locally reachable).
+  Today HuggingFace model downloads are the only cache path;
+  no PVC-backed persistent model cache is tested.
+
+### Supply chain & operational safety
+
+- **`govulncheck`** — Go dependency vulnerability scan. pip-audit
+  covers Python; Go's `stdlib` and `k8s.io/*` dependencies are
+  not scanned. `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
+  is a single CI step.
+- **SBOM / provenance** — no SLSA 3 provenance attestation for
+  the three published images. Supply-chain security today is:
+  "we published the image from a GitHub Actions runner." For
+  production, add `docker build --provenance=true --sbom=true`,
+  sign with `cosign`, and publish an SBOM alongside releases.
+- **Operator PodDisruptionBudget** — the Retriever Deployment
+  has a PDB template; the operator Deployment does not. A
+  cluster drain during an ingest could kill the operator's
+  leader pod mid-reconcile without a PDB to protect it.
+- **Pod Security Standards** — `restricted` profile
+  compatibility is not verified. The Pod spec uses
+  `securityContext` drops and `readOnlyRootFilesystem` but
+  `allowPrivilegeEscalation`, `/proc` mount, and
+  `seLinuxOptions` are not checked against the restricted
+  profile.
+- **Metrics cardinality** — the `knowledgebase` label on every
+  Prometheus metric is unbounded. With 10,000 KBs, each gauge
+  generates 10,000 time-series. Must either switch to
+  per-namespace aggregation or use `k8s.io/component-base`
+  `metrics` with label-allowlist enforcement.
+- **Log sampling / rate limiting** — worker pods log
+  verbosely; in a busy cluster the per-pod log volume can
+  overload the kubelet and the API server's log tailer. The
+  worker should implement a burst-token log limiter.
+- **CRD pruning** — kubebuilder CRDs use `preserveUnknownFields:
+  false` by default, which means unknown fields are pruned at
+  admission. An explicit test with `kubectl apply --validate=strict`
+  submitting a KB with a typo'd field should verify the field
+  is silently dropped and the controller still reconciles.
+- **Resource quota compatibility** — create a `ResourceQuota`
+  in the namespace and deploy a KB. The operator's
+  `EnsureIngestionRun` / `EnsureVectorIndex` / `CreateJob`
+  calls must handle `Forbidden: exceeded quota` with a
+  condition on the KB rather than a controller loop error.
+  Untested today.
+- **ConfigMap 1MB limit** — the worker spec is mounted as a
+  `ConfigMap`. A KB with many `includeGlobs` or a large web
+  crawl URL list can exceed the 1 MiB ConfigMap size limit.
+  A size guard and/or split-to-secret fallback are needed.
+  Uncovered by any test today.
+- **Quick wins (sub-1-hour each)** — `make lint-helm` Makefile
+  target; `helm lint` in CI; `govulncheck` CI step; operator
+  PDB template; `BatchSize` configurable in the CRD (today
+  hardcoded to 64 in `ingest.py`).
+
 ### What's already done (from this work)
 
 #### From previous iteration (control/data plane separation + initial hardening)
