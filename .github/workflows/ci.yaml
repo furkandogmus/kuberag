@@ -9,6 +9,8 @@ on:
       - "LICENSE"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".gitignore"
+      - ".dockerignore"
   pull_request:
     branches: [main]
     paths-ignore:
@@ -17,6 +19,8 @@ on:
       - "LICENSE"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".gitignore"
+      - ".dockerignore"
 
 concurrency:
   group: ci-${{ github.ref }}
