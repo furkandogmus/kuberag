@@ -276,9 +276,6 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
 
 ### Security
 
-- **Security disclosure policy and supported versions** — `SECURITY.md`
-  is 863 bytes today. Production OSS needs: contact email / PGP key,
-  disclosure timeline, supported-version matrix, CVE history.
 - **Network policy egress allowlist per store** — `NetworkPolicy`
   defaults to "DNS, API server, vector stores, external APIs". For a
   locked-down deployment, each KB should be able to declare the
@@ -311,10 +308,6 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
 
 ### Observability & operations
 
-- **Code coverage measurement** — no `go test -cover` in the Makefile or
-  CI. Without coverage data, "what are we not testing?" is unanswerable.
-  Production should publish a coverage report (Codecov / coveralls) and
-  gate new code on minimum coverage per package.
 - **Load / benchmark suite** — no benchmarks for ingest Job throughput
   (chunks/sec, MB/sec source), retriever p50/p95/p99 latency under
   concurrent load, or controller reconcile throughput. Defaults
@@ -325,9 +318,6 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   arbitrary text inputs (empty, 10 MB, pure whitespace, control
   characters). No Hypothesis / `testing/quick` coverage. Production
   should fuzz the chunking and embed boundary conditions.
-- **Race-condition tests** — `recordBest`, `applyAutoTune`, and
-  `userEditedSpec` mutate `Status` from a single reconciler, but two
-  concurrent Job events can race. No integration test simulates this.
 - **OTel tracing** — already on the "Near term" list. Cross-process
   traces (operator → worker → store) are required to debug latency
   regressions in production.
@@ -335,36 +325,14 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   every 60s. With 1000 KBs, that's 17 req/s of small HTTP calls. Should
   be batched (e.g. one probe per store, returning health for all
   collections).
-- **Auto-tune timing surfaced in status** — `Status.AutoTuneAttempts`
-  increments but the total wall-clock time spent in the auto-tune loop
-  is not recorded. Need a `Status.AutoTuneStartedAt` and a Prometheus
-  histogram of tune-loop duration for SLI tracking.
 - **SLO dashboards** — already on "Near term". Need: ingestion
   freshness (time since last successful index), recall percentiles,
   retriever p99 latency, error rates, saturation. Without SLOs
   defined, on-call can't make paging decisions.
 - **Audit log shipping** — operator lifecycle events (KB created /
-  modified / deleted, eval run, secret rotation observed) should be
-  shipped to an external log aggregator with the actor's identity
-  (today Kubernetes events are emitted but not forwarded).
-- **CHANGELOG** — none. v0.1 → v0.2 → v0.3 transitions are invisible to
-  consumers. Production needs a real changelog (per release, with
-  `Added / Changed / Deprecated / Removed / Fixed / Security`).
 
 ### Resilience
 
-- **TTL / deadline configurable per KB** — recently added. Default
-  300s/7200s is fine for small corpora but too short for
-  multi-million-chunk KBs. Make sure the new fields are tested under
-  load.
-- **Secret rotation independent of re-index** — recently added
-  (`ObservedSecretsHash` separated from `ObservedSpecHash`). Verify
-  with an integration test that rotates a Secret and asserts the
-  store is untouched.
-- **Stale Job detection** — if the operator dies mid-reconcile, an
-  `ActiveJob` may be left set forever. Need a TTL-based auto-cleanup
-  for `kb.Status.ActiveJob` (e.g. "if `ActiveJob` was set more than
-  N× ActiveDeadline ago with no corresponding Job, clear it").
 - **Worker pod preemption tolerance** — workers run with `RestartPolicy
   = Never` and no checkpoint. A 2-hour spot preemption wastes 2 hours
   of embedding cost. Need checkpoint / resume so an interrupted Job
@@ -393,33 +361,53 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   compromised KB should not be able to delete another KB's
   ConfigMap or IngestionRun.
 
-### Documentation
-
-- **CONTRIBUTING.md details** — 2 KB today. Need: code-style guide,
-  PR review process, how to run unit + integration + e2e, how to add
-  a new source / store / provider, release checklist.
-- **API reference generated from code** — `docs/API.md` is hand-written
-  and out of date every time a field is added. Generate from
-  `controller-gen` + `gen-crd-api-reference-docs` so the published
-  reference is always in sync with the CRDs.
-- **Operations runbook** — there is no `RUNBOOK.md`. On-call needs:
-  "what does `PhaseFailed` mean", "how to re-trigger ingestion
-  without losing state", "how to roll back a generation", "how to
-  scale the retriever", "how to drain and restart workers".
-- **Versioning and deprecation policy** — once `v1` lands, document
-  which fields are deprecated, how long they'll be supported, and
-  what the upgrade path is.
-- **Reference architecture** — for a real production deployment, a
-  diagram and example manifests covering: external Postgres for
-  pgvector, external Qdrant cluster (HA), OIDC-fronted retriever, S3
-  source with IRSA, secrets in External Secrets Operator. Today only
-  the in-cluster k3d demo is documented.
-
 ### What's already done (from this work)
 
+#### From previous iteration (control/data plane separation + initial hardening)
 - Real Qdrant + pgvector integration tests in CI (Milvus nightly-only)
 - pip-audit + Trivy container scan in CI
 - Secret values separated from corpus `specHash`
 - Configurable `TTL`, `ActiveDeadline`, model-cache size per KB
 - Controller split into 5 focused files
 - DNS rebinding mitigation + Psycopg `sql.Identifier` for table names
+
+#### Documentation (all completed)
+- `CONTRIBUTING.md` — code style (Go/Python/YAML), PR process, release
+  checklist, how to add new source/store/provider
+- `SECURITY.md` — disclosure timeline (90-day), supported versions,
+  severity classification, known accepted risks, CVE history table
+- `docs/CHANGELOG.md` — Keep-a-Changelog format with `[Unreleased]`
+  section
+- `docs/RUNBOOK.md` — on-call handbook: phase meanings, re-trigger,
+  rollback, scaling, drain/restart, common failure modes, jq queries
+- `docs/VERSIONING.md` — SemVer + Kubernetes API conventions,
+  deprecation policy, supported-versions matrix
+- `docs/ARCHITECTURE-reference.md` — production deployment: HA, IRSA,
+  ingress with OIDC, NetworkPolicy, observability, DR procedure
+- `docs/API.md` — auto-generated from CRD YAML via `hack/gen-api-docs.py`;
+  CI checks staleness on every push
+
+#### Controller & observability (this iteration)
+- **Code coverage in CI** — `go test -coverprofile` with `MIN_COVERAGE`
+  gate (default %10). Coverage artifact uploaded. `make test-coverage`.
+  Current: 19.7% total, 29.8% controller package.
+- **Sources `MaxItems` documented** — `Sources` (5) and `WebSource.URLs`
+  (20) now carry kubebuilder descriptions explaining the limit and
+  how to scale past it (split into multiple KBs).
+- **Stale Job detection** — new `Status.ActiveJobStartedAt` +
+  `isActiveJobTimedOut()`. Clears `ActiveJob` if the Job is past
+  `ActiveDeadlineSeconds + 10 min` grace. Defensive cleanup for lost
+  watch events / leader handoffs. Sets `IngestionStuck` condition.
+- **Auto-tune timing** — new `Status.AutoTuneStartedAt` +
+  `rag_knowledgebase_autotune_duration_seconds` Prometheus histogram.
+  `recordAutoTuneDuration()` observes on converge / exhaust / reset.
+- **Secret rotation verified** — unit test that rotates a referenced
+  Secret and asserts `ObservedSpecHash` is unchanged while
+  `ObservedSecretsHash` updates. Bug fixed: `ObservedSecretsHash` was
+  only set on first reconcile, now updated on every reconcile when the
+  computed value differs.
+- **Race condition test** — documents the `statusUpdate` wholesale-replace
+  semantics. controller-runtime WorkQueue serialises per-object-key so
+  this is safe in practice; test is a tripwire if
+  `MaxConcurrentReconciles` is ever raised above 1 without first
+  converting to a JSON merge patch.
