@@ -47,24 +47,24 @@ func TestEffectiveChunkingDefaults(t *testing.T) {
 	}
 }
 
-func TestSpecHashStableAndSensitive(t *testing.T) {
+func TestCorpusHashStableAndSensitive(t *testing.T) {
 	kb := baseKB()
-	h1 := specHash(kb, "")
-	if h1 != specHash(kb, "") {
-		t.Fatal("specHash not deterministic")
+	h1 := corpusHash(kb)
+	if h1 != corpusHash(kb) {
+		t.Fatal("corpusHash not deterministic")
 	}
 
 	// Changing the embedding model must change the hash.
 	kb.Spec.Embedding.Model = "bge-large"
-	if specHash(kb, "") == h1 {
-		t.Fatal("specHash should change when model changes")
+	if corpusHash(kb) == h1 {
+		t.Fatal("corpusHash should change when model changes")
 	}
 
 	// Changing spec chunking must change the hash.
 	kb2 := baseKB()
 	kb2.Spec.Chunking.MaxTokens = 500
-	if specHash(kb2, "") == h1 {
-		t.Fatal("specHash should change when chunking changes")
+	if corpusHash(kb2) == h1 {
+		t.Fatal("corpusHash should change when chunking changes")
 	}
 
 	// Changing embedding provider details must change the hash even when the
@@ -72,15 +72,15 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 	kbProvider := baseKB()
 	kbProvider.Spec.Embedding.Provider = "openai-compatible"
 	kbProvider.Spec.Embedding.BaseURL = "http://embeddings:8080/v1"
-	if specHash(kbProvider, "") == h1 {
-		t.Fatal("specHash should change when embedding provider details change")
+	if corpusHash(kbProvider) == h1 {
+		t.Fatal("corpusHash should change when embedding provider details change")
 	}
 
 	// Changing the target collection must trigger re-ingestion into the new store location.
 	kbStore := baseKB()
 	kbStore.Spec.VectorStore.Collection = "other-collection"
-	if specHash(kbStore, "") == h1 {
-		t.Fatal("specHash should change when vector store collection changes")
+	if corpusHash(kbStore) == h1 {
+		t.Fatal("corpusHash should change when vector store collection changes")
 	}
 
 	// An auto-tuned override (status) must NOT change the hash — auto-tune
@@ -89,15 +89,19 @@ func TestSpecHashStableAndSensitive(t *testing.T) {
 	tuned := specChunking(kb3)
 	tuned.Overlap += 40
 	kb3.Status.EffectiveChunking = &tuned
-	if specHash(kb3, "") != h1 {
-		t.Fatal("specHash must ignore the auto-tune override")
+	if corpusHash(kb3) != h1 {
+		t.Fatal("corpusHash must ignore the auto-tune override")
 	}
+
+	// Secret *references* (name/key) are part of the spec and DO change the hash.
+	// Only the secret *values* (from computeSecretsHash) are excluded — credential
+	// rotation should not trigger re-indexing (tested in TestKBSecretsHashAndWatch).
 }
 
 func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 	kb := baseKB()
 	jobEff := ragv1alpha1.ChunkingSpec{Strategy: ragv1alpha1.ChunkFixed, MaxTokens: 500, Overlap: 50}
-	job, _, err := buildIngestJob(kb, "oldhash", ragv1alpha1.IngestFull, jobEff)
+	job, _, err := buildIngestJob(kb, "oldhash", "oldsecrets", ragv1alpha1.IngestFull, jobEff)
 	if err != nil {
 		t.Fatalf("buildIngestJob returned error: %v", err)
 	}
@@ -106,6 +110,9 @@ func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 	if got := jobSpecHash(job, "newhash"); got != "oldhash" {
 		t.Fatalf("expected completed job hash oldhash, got %q", got)
 	}
+	if got := jobSecretsHash(job, "newsecrets"); got != "oldsecrets" {
+		t.Fatalf("expected completed job secrets hash oldsecrets, got %q", got)
+	}
 	if got := jobEffectiveChunking(job, currentEff); got != jobEff {
 		t.Fatalf("expected job chunking %+v, got %+v", jobEff, got)
 	}
@@ -113,24 +120,34 @@ func TestCompletedJobCarriesOwnHashAndChunking(t *testing.T) {
 
 func TestActiveIngestStalenessUsesJobHash(t *testing.T) {
 	kb := baseKB()
-	currentHash := specHash(kb, "")
-	job, _, err := buildIngestJob(kb, currentHash, ragv1alpha1.IngestFull, effectiveChunking(kb))
+	currentHash := corpusHash(kb)
+	job, _, err := buildIngestJob(kb, currentHash, "s1", ragv1alpha1.IngestFull, effectiveChunking(kb))
 	if err != nil {
 		t.Fatalf("buildIngestJob returned error: %v", err)
 	}
 
-	if activeIngestIsStale(job, currentHash, "previous-hash") {
+	if activeIngestIsStale(job, currentHash, "s1", "previous-hash", "s1") {
 		t.Fatal("new ingest for the desired spec must not be cancelled because the last completed hash is old")
 	}
 	job.Labels[labelSpecHash] = "previous-hash"
-	if !activeIngestIsStale(job, currentHash, "previous-hash") {
+	if !activeIngestIsStale(job, currentHash, "s1", "previous-hash", "s1") {
 		t.Fatal("ingest created for an older spec should be cancelled")
+	}
+
+	// Changing secrets should also mark the job as stale.
+	job2, _, err := buildIngestJob(kb, currentHash, "s2", ragv1alpha1.IngestFull, effectiveChunking(kb))
+	if err != nil {
+		t.Fatalf("buildIngestJob returned error: %v", err)
+	}
+	job2.Labels[labelSecretsHash] = "old-secrets"
+	if !activeIngestIsStale(job2, currentHash, "new-secrets", currentHash, "old-secrets") {
+		t.Fatal("ingest with outdated secrets should be cancelled")
 	}
 }
 
 func TestIngestFailureRetryCooldown(t *testing.T) {
 	kb := baseKB()
-	hash := specHash(kb, "")
+	hash := corpusHash(kb)
 	now := time.Now()
 	failedAt := metav1.NewTime(now.Add(-time.Minute))
 	kb.Status.Phase = ragv1alpha1.PhaseFailed
@@ -150,7 +167,7 @@ func TestIngestFailureRetryCooldown(t *testing.T) {
 
 func TestNeedsIngest(t *testing.T) {
 	kb := baseKB()
-	hash := specHash(kb, "")
+	hash := corpusHash(kb)
 
 	if _, need := needsIngest(kb, hash); !need {
 		t.Fatal("fresh KB with no observed hash should need ingest")
@@ -165,7 +182,7 @@ func TestNeedsIngest(t *testing.T) {
 
 	// Model drift.
 	kb.Spec.Embedding.Model = "bge-large"
-	newHash := specHash(kb, "")
+	newHash := corpusHash(kb)
 	if _, need := needsIngest(kb, newHash); !need {
 		t.Fatal("model change should trigger ingest")
 	}
@@ -174,7 +191,7 @@ func TestNeedsIngest(t *testing.T) {
 func TestNeedsIngestFreshness(t *testing.T) {
 	kb := baseKB()
 	kb.Spec.Freshness.Schedule = "*/5 * * * *" // every 5 minutes
-	hash := specHash(kb, "")
+	hash := corpusHash(kb)
 	kb.Status.ObservedSpecHash = hash
 	kb.Status.ObservedEmbeddingModel = "bge-small"
 
@@ -452,7 +469,7 @@ func TestAutoTuneHelpers(t *testing.T) {
 func TestSecurityContextHardening(t *testing.T) {
 	kb := baseKB()
 	// Test baseJob security context and volumes
-	job, err := baseJob(kb, "test-job", "ingest", "hash123", "test-job-spec", []string{"ingest"}, nil)
+	job, err := baseJob(kb, "test-job", "ingest", "hash123", "secrets1", "test-job-spec", []string{"ingest"}, nil)
 	if err != nil {
 		t.Fatalf("baseJob returned error: %v", err)
 	}
@@ -604,7 +621,7 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 		{Key: "cpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	}
 
-	job, err := baseJob(kb, "test-job", "ingest", "hash123", "test-job-spec", []string{"ingest"}, nil)
+	job, err := baseJob(kb, "test-job", "ingest", "hash123", "secrets1", "test-job-spec", []string{"ingest"}, nil)
 	if err != nil {
 		t.Fatalf("baseJob returned error: %v", err)
 	}
@@ -686,21 +703,21 @@ func TestKBSecretsHashAndWatch(t *testing.T) {
 	}
 
 	hash1 := r.computeSecretsHash(context.Background(), kb)
-	specHash1 := specHash(kb, hash1)
+	corpusHash1 := corpusHash(kb)
 
-	// Change secret value and verify both secrets hash and spec hash change
+	// Change secret value — secretsHash must change, but corpusHash must NOT.
 	secret1.Data["token"] = []byte("git-token-value-updated")
 	fakeClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret1).Build()
 	r.Client = fakeClient
 
 	hash2 := r.computeSecretsHash(context.Background(), kb)
-	specHash2 := specHash(kb, hash2)
+	corpusHash2 := corpusHash(kb)
 
 	if hash1 == hash2 {
-		t.Error("expected KB secrets hash to change when source secret is updated")
+		t.Error("expected secrets hash to change when source secret is updated")
 	}
-	if specHash1 == specHash2 {
-		t.Error("expected KB spec hash to change when source secret is updated")
+	if corpusHash1 != corpusHash2 {
+		t.Error("corpusHash must NOT change when only secret values change — credential rotation should not trigger re-index")
 	}
 }
 
@@ -708,7 +725,7 @@ func TestInvalidIngestionResourcesReturnError(t *testing.T) {
 	kb := baseKB()
 	kb.Spec.Ingestion.Resources = &ragv1alpha1.ResourceRequirements{CPU: "not-a-quantity"}
 
-	if _, _, err := buildIngestJob(kb, "hash123", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
+	if _, _, err := buildIngestJob(kb, "hash123", "secrets1", ragv1alpha1.IngestFull, effectiveChunking(kb)); err == nil {
 		t.Fatal("expected invalid ingestion resources to return an error")
 	}
 }

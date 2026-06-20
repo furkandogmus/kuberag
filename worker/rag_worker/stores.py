@@ -351,8 +351,11 @@ class PgVectorStore(VectorStore):
 
     def __init__(self, endpoint: str, collection: str, distance: str):
         import psycopg
+        import psycopg.sql
 
         self.table = _sanitize(collection)
+        self._tbl = psycopg.sql.Identifier(self.table)
+        self._src_idx = psycopg.sql.Identifier(f"{self.table}_source_idx")
         self.distance = distance
         cred = os.environ.get("VECTORSTORE_CREDENTIAL")
         if cred and "@" not in endpoint:
@@ -361,27 +364,37 @@ class PgVectorStore(VectorStore):
         self.conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
     def ensure_collection(self, dim: int, distance: str) -> None:
+        import psycopg.sql
         self.conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {self.table} ("
-            f"id text PRIMARY KEY, source text, doc_path text, text text, "
-            f"chunk_hash text, embedding vector({dim}))"
+            psycopg.sql.SQL("CREATE TABLE IF NOT EXISTS {} ("
+            "id text PRIMARY KEY, source text, doc_path text, text text, "
+            "chunk_hash text, embedding vector({}))").format(self._tbl, psycopg.sql.Literal(dim))
         )
-        self.conn.execute(f"CREATE INDEX IF NOT EXISTS {self.table}_source_idx ON {self.table} (source)")
+        self.conn.execute(
+            psycopg.sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} (source)").format(self._src_idx, self._tbl)
+        )
 
     def recreate_collection(self, dim: int, distance: str) -> None:
-        self.conn.execute(f"DROP TABLE IF EXISTS {self.table}")
+        import psycopg.sql
+        self.conn.execute(psycopg.sql.SQL("DROP TABLE IF EXISTS {}").format(self._tbl))
         self.ensure_collection(dim, distance)
 
     def delete_by_source(self, source_name: str) -> None:
-        self.conn.execute(f"DELETE FROM {self.table} WHERE source = %s", (source_name,))
+        import psycopg.sql
+        self.conn.execute(
+            psycopg.sql.SQL("DELETE FROM {} WHERE source = %s").format(self._tbl), (source_name,)
+        )
 
     def upsert(self, points: list[dict]) -> None:
+        import psycopg.sql
         with self.conn.cursor() as cur:
             cur.executemany(
-                f"INSERT INTO {self.table} (id, source, doc_path, text, chunk_hash, embedding) "
-                f"VALUES (%s, %s, %s, %s, %s, %s) "
-                f"ON CONFLICT (id) DO UPDATE SET "
-                f"text = EXCLUDED.text, chunk_hash = EXCLUDED.chunk_hash, embedding = EXCLUDED.embedding",
+                psycopg.sql.SQL(
+                    "INSERT INTO {} (id, source, doc_path, text, chunk_hash, embedding) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "text = EXCLUDED.text, chunk_hash = EXCLUDED.chunk_hash, embedding = EXCLUDED.embedding"
+                ).format(self._tbl),
                 [
                     (
                         p["id"], p["payload"]["source"], p["payload"]["doc_path"],
@@ -393,7 +406,8 @@ class PgVectorStore(VectorStore):
             )
 
     def count(self) -> int:
-        return self.conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0]
+        import psycopg.sql
+        return self.conn.execute(psycopg.sql.SQL("SELECT count(*) FROM {}").format(self._tbl)).fetchone()[0]
 
     def _build_where(
         self,
@@ -422,6 +436,10 @@ class PgVectorStore(VectorStore):
             where_clause = "WHERE " + " AND ".join(clauses)
         return where_clause, params
 
+    def _sql(self, template: str, *args) -> "psycopg.sql.Composed":
+        import psycopg.sql
+        return psycopg.sql.SQL(template).format(self._tbl, *args)
+
     def search(
         self,
         vector: list[float],
@@ -435,8 +453,10 @@ class PgVectorStore(VectorStore):
         where_clause, params = self._build_where(source, doc_path, doc_path_prefix)
         query_params = [vec] + params + [topk]
         rows = self.conn.execute(
-            f"SELECT source, doc_path, text, embedding {op} %s AS dist "
-            f"FROM {self.table} {where_clause} ORDER BY dist ASC LIMIT %s",
+            self._sql(
+                f"SELECT source, doc_path, text, embedding {op} %s AS dist "
+                f"FROM {{}} {where_clause} ORDER BY dist ASC LIMIT %s"
+            ),
             query_params,
         ).fetchall()
         out = []
@@ -455,8 +475,10 @@ class PgVectorStore(VectorStore):
         where_clause, params = self._build_where(source, doc_path, doc_path_prefix, text_query=query)
         query_params = params + [topk]
         rows = self.conn.execute(
-            f"SELECT source, doc_path, text "
-            f"FROM {self.table} {where_clause} LIMIT %s",
+            self._sql(
+                f"SELECT source, doc_path, text "
+                f"FROM {{}} {where_clause} LIMIT %s"
+            ),
             query_params,
         ).fetchall()
         out = []
@@ -465,19 +487,28 @@ class PgVectorStore(VectorStore):
         return out
 
     def drop(self) -> None:
-        self.conn.execute(f"DROP TABLE IF EXISTS {self.table}")
+        import psycopg.sql
+        self.conn.execute(psycopg.sql.SQL("DROP TABLE IF EXISTS {}").format(self._tbl))
 
     def swap_collection(self, shadow_name: str) -> bool:
         """pgvector: transactional table rename for atomic promotion."""
         import psycopg
+        import psycopg.sql
 
-        old_table = self.table
-        shadow_table = _sanitize(shadow_name)
+        old_tbl = self._tbl
+        old_old = psycopg.sql.Identifier(f"{self.table}_old")
+        shadow_tbl = psycopg.sql.Identifier(_sanitize(shadow_name))
         try:
             with self.conn.transaction():
-                self.conn.execute(f"ALTER TABLE IF EXISTS {old_table} RENAME TO {old_table}_old")
-                self.conn.execute(f"ALTER TABLE {shadow_table} RENAME TO {old_table}")
-                self.conn.execute(f"DROP TABLE IF EXISTS {old_table}_old")
+                self.conn.execute(
+                    psycopg.sql.SQL("ALTER TABLE IF EXISTS {} RENAME TO {}").format(old_tbl, old_old)
+                )
+                self.conn.execute(
+                    psycopg.sql.SQL("ALTER TABLE {} RENAME TO {}").format(shadow_tbl, old_tbl)
+                )
+                self.conn.execute(
+                    psycopg.sql.SQL("DROP TABLE IF EXISTS {}").format(old_old)
+                )
         except psycopg.Error:
             return False
         return True

@@ -260,6 +260,27 @@ type IngestionSpec struct {
 	// Affinity controls pod scheduling preferences.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+	// TTLSecondsAfterFinished limits the lifetime of completed ingestion/eval
+	// Jobs. After this duration the Job and its result ConfigMap are garbage
+	// collected by the cluster. Defaults to 300 (5 minutes). Productions
+	// environments may want 86400 (24h) for audit trails.
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+	// ActiveDeadlineSeconds is the hard timeout for a single ingestion/eval Job
+	// pod. Defaults to 7200 (2 hours). Increase for very large corpora.
+	// +kubebuilder:default=7200
+	// +kubebuilder:validation:Minimum=60
+	// +optional
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+	// ModelCacheSizeLimit sets the size limit for the EmptyDir-backed HuggingFace
+	// model cache. Embedding models (~100MB-2GB) are re-downloaded per Job when
+	// cache is too small. Set to a value larger than the sum of all models you
+	// expect to use. Defaults to "2Gi".
+	// +kubebuilder:default="2Gi"
+	// +optional
+	ModelCacheSizeLimit string `json:"modelCacheSizeLimit,omitempty"`
 }
 
 // ResourceRequirements is a trimmed mirror of core/v1 requests+limits.
@@ -381,11 +402,18 @@ type KnowledgeBaseStatus struct {
 	// ObservedGeneration is the .metadata.generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// ObservedSpecHash fingerprints the re-ingest-relevant spec fields.
+	// ObservedSpecHash fingerprints the corpus-relevant spec fields (sources,
+	// chunking, embedding, vector store). Secret values are excluded so credential
+	// rotation does not force a full re-index.
 	// +optional
 	ObservedSpecHash string `json:"observedSpecHash,omitempty"`
-	// LastFailedSpecHash fingerprints the spec used by the most recent failed
-	// ingestion. It prevents Job events from causing an immediate retry loop.
+	// ObservedSecretsHash fingerprints the last ingested credential values.
+	// A change cancels any in-flight ingest Job but does not trigger re-indexing
+	// on its own — credentials are injected at Job start time.
+	// +optional
+	ObservedSecretsHash string `json:"observedSecretsHash,omitempty"`
+	// LastFailedSpecHash fingerprints the corpus spec used by the most recent
+	// failed ingestion.
 	// +optional
 	LastFailedSpecHash string `json:"lastFailedSpecHash,omitempty"`
 	// LastFailureTime is when the most recent ingestion failed.

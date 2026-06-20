@@ -23,16 +23,11 @@ updates:
     groups:
       python-deps:
         patterns: ["*"]
-    # The ML/serving stack is tightly version-coupled and validated end-to-end;
-    # the unit-test CI doesn't import these, so bumps are made deliberately.
+    # The ML/serving stack is tightly version-coupled. Dependabot will open PRs;
+    # pip-audit in CI catches known vulnerabilities so bumps are auditable.
     ignore:
-      - dependency-name: fastembed
-      - dependency-name: pymilvus
       - dependency-name: marshmallow
       - dependency-name: setuptools
-      - dependency-name: openai
-      - dependency-name: httpx
-      - dependency-name: qdrant-client
 
   - package-ecosystem: docker
     directories:
@@ -40,8 +35,6 @@ updates:
       - "/worker"
     schedule:
       interval: weekly
-    # Base-image major bumps (e.g. python 3.12 -> 3.14) outrun the ML wheels;
-    # take patch/minor only.
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+    groups:
+      docker:
+        patterns: ["*"]

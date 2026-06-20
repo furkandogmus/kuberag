@@ -93,13 +93,17 @@ def _full_ingest(spec, embedder, distance, strategy, max_tokens, overlap):
 
 def _replay_into(spec, embedder, store, strategy, max_tokens, overlap, source_results):
     """Re-ingest into a fresh collection (expensive fallback for non-atomic stores)."""
+    import shutil
     for i, src in enumerate(spec["sources"]):
         name = src["name"]
         dest = Path(tempfile.mkdtemp()) / f"src-{i}"
-        sd = sources.fetch(src, dest)
-        points = _iter_points(name, sd, strategy, max_tokens, overlap)
-        count = _embed_and_upsert(embedder, store, points)
-        source_results[i] = {"name": name, "revision": sd.revision, "chunks": count}
+        try:
+            sd = sources.fetch(src, dest)
+            points = _iter_points(name, sd, strategy, max_tokens, overlap)
+            count = _embed_and_upsert(embedder, store, points)
+            source_results[i] = {"name": name, "revision": sd.revision, "chunks": count}
+        finally:
+            shutil.rmtree(dest.parent, ignore_errors=True)
 
 
 def _incremental_ingest(spec, embedder, distance, strategy, max_tokens, overlap):

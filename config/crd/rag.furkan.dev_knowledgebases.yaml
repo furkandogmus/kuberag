@@ -157,6 +157,14 @@ spec:
               ingestion:
                 description: IngestionSpec tunes how ingestion Jobs run.
                 properties:
+                  activeDeadlineSeconds:
+                    default: 7200
+                    description: |-
+                      ActiveDeadlineSeconds is the hard timeout for a single ingestion/eval Job
+                      pod. Defaults to 7200 (2 hours). Increase for very large corpora.
+                    format: int64
+                    minimum: 60
+                    type: integer
                   affinity:
                     description: Affinity controls pod scheduling preferences.
                     properties:
@@ -1085,6 +1093,14 @@ spec:
                     - full
                     - incremental
                     type: string
+                  modelCacheSizeLimit:
+                    default: 2Gi
+                    description: |-
+                      ModelCacheSizeLimit sets the size limit for the EmptyDir-backed HuggingFace
+                      model cache. Embedding models (~100MB-2GB) are re-downloaded per Job when
+                      cache is too small. Set to a value larger than the sum of all models you
+                      expect to use. Defaults to "2Gi".
+                    type: string
                   nodeSelector:
                     additionalProperties:
                       type: string
@@ -1143,6 +1159,16 @@ spec:
                           type: string
                       type: object
                     type: array
+                  ttlSecondsAfterFinished:
+                    default: 300
+                    description: |-
+                      TTLSecondsAfterFinished limits the lifetime of completed ingestion/eval
+                      Jobs. After this duration the Job and its result ConfigMap are garbage
+                      collected by the cluster. Defaults to 300 (5 minutes). Productions
+                      environments may want 86400 (24h) for audit trails.
+                    format: int32
+                    minimum: 0
+                    type: integer
                 type: object
               retrievalQuality:
                 description: RetrievalQualitySpec enables periodic evaluation and
@@ -1564,8 +1590,8 @@ spec:
                 type: integer
               lastFailedSpecHash:
                 description: |-
-                  LastFailedSpecHash fingerprints the spec used by the most recent failed
-                  ingestion. It prevents Job events from causing an immediate retry loop.
+                  LastFailedSpecHash fingerprints the corpus spec used by the most recent
+                  failed ingestion.
                 type: string
               lastFailureTime:
                 description: LastFailureTime is when the most recent ingestion failed.
@@ -1644,9 +1670,17 @@ spec:
                 description: ObservedGeneration is the .metadata.generation last reconciled.
                 format: int64
                 type: integer
+              observedSecretsHash:
+                description: |-
+                  ObservedSecretsHash fingerprints the last ingested credential values.
+                  A change cancels any in-flight ingest Job but does not trigger re-indexing
+                  on its own — credentials are injected at Job start time.
+                type: string
               observedSpecHash:
-                description: ObservedSpecHash fingerprints the re-ingest-relevant
-                  spec fields.
+                description: |-
+                  ObservedSpecHash fingerprints the corpus-relevant spec fields (sources,
+                  chunking, embedding, vector store). Secret values are excluded so credential
+                  rotation does not force a full re-index.
                 type: string
               pendingRetune:
                 description: |-

@@ -122,7 +122,7 @@ func (r *RetrieverReconciler) computeSecretsHash(ctx context.Context, rt *ragv1a
 		appendSecretHash(ctx, r.Client, rt.Namespace, "generation.apiKey", rt.Spec.Generation.APIKeySecretRef, hasher)
 	}
 
-	return hex.EncodeToString(hasher.Sum(nil))
+	return hex.EncodeToString(hasher.Sum(nil)[:4])
 }
 
 func retrieverImage(rt *ragv1alpha1.Retriever) string {
@@ -255,7 +255,7 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 					PriorityClassName:             "kuberag-system",
 					TerminationGracePeriodSeconds: ptr.To(int64(60)),
 					SecurityContext:               hardenedPodSecurityContext(),
-					Volumes:                       []corev1.Volume{scratchVolume()},
+					Volumes:                       []corev1.Volume{scratchVolume("")},
 					NodeSelector:                  rt.Spec.NodeSelector,
 					Tolerations:                   rt.Spec.Tolerations,
 					Affinity:                      rt.Spec.Affinity,

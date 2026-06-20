@@ -1,0 +1,135 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # 03:00 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  integration-stores:
+    name: real store integration tests
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+      pgvector:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: worker
+        run: pip install -r requirements.txt -r requirements-test.txt
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:6333/healthz > /dev/null 2>&1; then
+              echo "Qdrant ready"
+              break
+            fi
+            echo "waiting for Qdrant... $i"
+            sleep 2
+          done
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
+              echo "pgvector ready"
+              break
+            fi
+            echo "waiting for pgvector... $i"
+            sleep 2
+          done
+      - name: Run Qdrant + pgvector integration tests
+        working-directory: worker
+        env:
+          QDRANT_ENDPOINT: http://localhost:6333
+          PGVECTOR_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+        run: python -m pytest tests/test_stores_integration.py -v
+
+  milvus-nightly:
+    name: milvus integration
+    runs-on: ubuntu-latest
+    services:
+      etcd:
+        image: quay.io/coreos/etcd:v3.5.5
+        env:
+          ETCD_AUTO_COMPACTION_MODE: revision
+          ETCD_AUTO_COMPACTION_RETENTION: "1000"
+          ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+          ETCD_SNAPSHOT_COUNT: "50000"
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 9000:9000
+        volumes:
+          - /tmp/minio-data:/data
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: worker
+        run: pip install -r requirements.txt -r requirements-test.txt
+      - name: Start Milvus standalone
+        run: |
+          docker run -d --name milvus-standalone \
+            --network ${{ job.services.etcd.network }} \
+            -e ETCD_ENDPOINTS=etcd:2379 \
+            -e MINIO_ADDRESS=minio:9000 \
+            -e MINIO_ACCESS_KEY_ID=minioadmin \
+            -e MINIO_SECRET_ACCESS_KEY=minioadmin \
+            -p 19530:19530 \
+            milvusdb/milvus:latest milvus run standalone
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:9091/healthz > /dev/null 2>&1; then
+              echo "Milvus ready"
+              break
+            fi
+            echo "waiting for Milvus... $i"
+            sleep 5
+          done
+      - name: Run Milvus integration tests
+        working-directory: worker
+        env:
+          MILVUS_ENDPOINT: http://localhost:19530
+        run: python -m pytest tests/test_milvus_nightly.py -v
+
+  pip-audit-full:
+    name: full dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: pip-audit worker
+        working-directory: worker
+        run: |
+          pip install pip-audit -r requirements.txt
+          pip-audit
+      - name: pip-audit retriever
+        working-directory: worker
+        run: pip-audit -r requirements-retriever.txt

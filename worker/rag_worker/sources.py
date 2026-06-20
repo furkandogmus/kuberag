@@ -8,7 +8,9 @@ import os
 import re
 import socket
 import subprocess
+import time
 import urllib.parse
+from collections import deque
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -298,11 +300,27 @@ def _web_hostname(url: str) -> str:
     return (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
 
 
+_dns_cache: dict[str, tuple[set[str], float]] = {}
+_DNS_CACHE_TTL = 60  # seconds
+
+
 def _resolve_web_addresses(hostname: str) -> set[str]:
-    return {
-        item[4][0]
-        for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-    }
+    now = time.time()
+    if hostname in _dns_cache:
+        addrs, ts = _dns_cache[hostname]
+        if now - ts < _DNS_CACHE_TTL:
+            return addrs
+    try:
+        addrs = {
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror:
+        if hostname in _dns_cache:
+            return _dns_cache[hostname][0]
+        raise
+    _dns_cache[hostname] = (addrs, now)
+    return addrs
 
 
 def _validate_web_target(url: str, allow_private: bool) -> None:
@@ -356,13 +374,13 @@ def fetch_web(src: dict) -> SourceDocs:
     seen: set[str] = set()
     queued: set[str] = set(normalized_seeds)
     indexed: set[str] = set()
-    queue: list[tuple[str, int]] = [(url, 0) for url in normalized_seeds]
+    queue: deque[tuple[str, int]] = deque((url, 0) for url in normalized_seeds)
     seed_domains = {_web_hostname(url) for url in normalized_seeds}
     docs: list[tuple[str, str]] = []
     fetched_pages = 0
 
     while queue and fetched_pages < max_pages:
-        url, depth = queue.pop(0)
+        url, depth = queue.popleft()
         queued.discard(url)
         if url in seen:
             continue

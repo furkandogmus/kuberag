@@ -22,11 +22,12 @@ const (
 	defaultRetrieverImage = "ghcr.io/furkandogmus/kuberag-retriever:latest"
 	defaultWorkerSA       = "kuberag-worker"
 
-	labelManagedBy = "app.kubernetes.io/managed-by"
-	labelKB        = "rag.furkan.dev/knowledgebase"
-	labelJobType   = "rag.furkan.dev/job-type"
-	labelSpecHash  = "rag.furkan.dev/spec-hash"
-	labelChunking  = "rag.furkan.dev/chunking" // strategy|maxTokens|overlap for jobEffectiveChunking
+	labelManagedBy    = "app.kubernetes.io/managed-by"
+	labelKB           = "rag.furkan.dev/knowledgebase"
+	labelJobType      = "rag.furkan.dev/job-type"
+	labelSpecHash     = "rag.furkan.dev/spec-hash"
+	labelSecretsHash  = "rag.furkan.dev/secrets-hash"
+	labelChunking     = "rag.furkan.dev/chunking" // strategy|maxTokens|overlap for jobEffectiveChunking
 
 	jobTypeIngest  = "ingest"
 	jobTypeEval    = "eval"
@@ -181,11 +182,16 @@ func specConfigMap(ns, name, specJSON string) *corev1.ConfigMap {
 
 // baseJob assembles the common Job skeleton for a worker invocation.
 // specCMName names the ConfigMap mounted at /etc/kuberag/spec.json.
-func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, specCMName string, args []string, extraEnv []corev1.EnvVar) (*batchv1.Job, error) {
+func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, secretsHash, specCMName string, args []string, extraEnv []corev1.EnvVar) (*batchv1.Job, error) {
 	backoff := int32(2)
-	// Short TTL so finished Jobs are GC'd well before the next scheduled run,
-	// avoiding name collisions on freshness re-syncs of an unchanged spec.
 	ttl := int32(300)
+	if kb.Spec.Ingestion.TTLSecondsAfterFinished != nil {
+		ttl = *kb.Spec.Ingestion.TTLSecondsAfterFinished
+	}
+	activeDeadline := int64(7200)
+	if kb.Spec.Ingestion.ActiveDeadlineSeconds != nil {
+		activeDeadline = *kb.Spec.Ingestion.ActiveDeadlineSeconds
+	}
 	sa := kb.Spec.Ingestion.ServiceAccountName
 	if sa == "" {
 		sa = defaultWorkerSA
@@ -206,28 +212,27 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, specCMName
 		return nil, err
 	}
 
+	labels := map[string]string{
+		labelManagedBy:   "kuberag",
+		labelKB:          kb.Name,
+		labelJobType:     jobTypeLabel,
+		labelSpecHash:    hash,
+		labelSecretsHash: secretsHash,
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: kb.Namespace,
-			Labels: map[string]string{
-				labelManagedBy: "kuberag",
-				labelKB:        kb.Name,
-				labelJobType:   jobTypeLabel,
-				labelSpecHash:  hash,
-			},
+			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
-			ActiveDeadlineSeconds:   ptr.To(int64(7200)), // 2h hard timeout
+			ActiveDeadlineSeconds:   &activeDeadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						labelManagedBy: "kuberag",
-						labelKB:        kb.Name,
-						labelJobType:   jobTypeLabel,
-					},
+					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
@@ -235,7 +240,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, specCMName
 					PriorityClassName:             "kuberag-system",
 					TerminationGracePeriodSeconds: ptr.To(int64(120)),
 					SecurityContext:               hardenedPodSecurityContext(),
-					Volumes:                       []corev1.Volume{scratchVolume(), specVolume(specCMName)},
+					Volumes:                       []corev1.Volume{scratchVolume(kb.Spec.Ingestion.ModelCacheSizeLimit), specVolume(specCMName)},
 					NodeSelector:                  kb.Spec.Ingestion.NodeSelector,
 					Tolerations:                   kb.Spec.Ingestion.Tolerations,
 					Affinity:                      kb.Spec.Ingestion.Affinity,
@@ -258,7 +263,7 @@ func baseJob(kb *ragv1alpha1.KnowledgeBase, name, jobTypeLabel, hash, specCMName
 }
 
 // buildIngestJob renders the ingestion Job (clone/chunk/embed/upsert).
-func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1.IngestMode, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
+func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, mode ragv1alpha1.IngestMode, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
 	specJSON, err := marshalEffectiveSpec(kb, effChunking)
 	if err != nil {
 		return nil, "", err
@@ -270,7 +275,7 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1
 		{Name: "INGEST_ROUND", Value: fmt.Sprintf("%d", kb.Status.IngestRound)},
 		{Name: "PRIOR_SOURCES_JSON", Value: priorSourcesJSON(kb)},
 	}
-	job, err := baseJob(kb, name, jobTypeIngest, hash, specConfigMapName(name), []string{"ingest"}, env)
+	job, err := baseJob(kb, name, jobTypeIngest, hash, secretsHash, specConfigMapName(name), []string{"ingest"}, env)
 	if err != nil {
 		return nil, "", err
 	}
@@ -280,7 +285,7 @@ func buildIngestJob(kb *ragv1alpha1.KnowledgeBase, hash string, mode ragv1alpha1
 
 // buildEvalJob renders the retrieval-quality evaluation Job. The round counter
 // makes each evaluation a fresh Job (the spec hash is stable across evals).
-func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash string, round int, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
+func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, round int, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
 	specJSON, err := marshalEffectiveSpec(kb, effChunking)
 	if err != nil {
 		return nil, "", err
@@ -291,7 +296,7 @@ func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash string, round int, effChun
 		{Name: "EVAL_DATASET_CONFIGMAP", Value: rq.DatasetRef.Name},
 		{Name: "EVAL_TOPK", Value: fmt.Sprintf("%d", defaultInt(rq.TopK, 8))},
 	}
-	job, err := baseJob(kb, name, jobTypeEval, hash, specConfigMapName(name), []string{"eval"}, env)
+	job, err := baseJob(kb, name, jobTypeEval, hash, secretsHash, specConfigMapName(name), []string{"eval"}, env)
 	if err != nil {
 		return nil, "", err
 	}
@@ -300,13 +305,13 @@ func buildEvalJob(kb *ragv1alpha1.KnowledgeBase, hash string, round int, effChun
 }
 
 // buildCleanupJob renders the teardown Job that drops the remote collection.
-func buildCleanupJob(kb *ragv1alpha1.KnowledgeBase) (*batchv1.Job, string, error) {
+func buildCleanupJob(kb *ragv1alpha1.KnowledgeBase, secretsHash string) (*batchv1.Job, string, error) {
 	specJSON, err := marshalEffectiveSpec(kb, effectiveChunking(kb))
 	if err != nil {
 		return nil, "", err
 	}
 	name := truncName(fmt.Sprintf("%s-cleanup", kb.Name))
-	job, err := baseJob(kb, name, jobTypeCleanup, "", specConfigMapName(name), []string{"cleanup"}, nil)
+	job, err := baseJob(kb, name, jobTypeCleanup, "", secretsHash, specConfigMapName(name), []string{"cleanup"}, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -395,8 +400,13 @@ func hardenedContainerSecurityContext() *corev1.SecurityContext {
 
 // scratchVolume / scratchMount give the read-only-rootfs containers a writable
 // place for clones, temp files, and model caches.
-func scratchVolume() corev1.Volume {
-	return corev1.Volume{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+func scratchVolume(cacheSizeLimit string) corev1.Volume {
+	vol := corev1.Volume{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+	if cacheSizeLimit != "" {
+		sz := resource.MustParse(cacheSizeLimit)
+		vol.EmptyDir.SizeLimit = &sz
+	}
+	return vol
 }
 
 func scratchMount() corev1.VolumeMount {
