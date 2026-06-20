@@ -820,8 +820,8 @@ func jobEffectiveChunking(j *batchv1.Job, fallback ragv1alpha1.ChunkingSpec) rag
 	parts := strings.SplitN(j.Labels[labelChunking], "|", 3)
 	if len(parts) == 3 {
 		c.Strategy = ragv1alpha1.ChunkingStrategy(parts[0])
-		fmt.Sscanf(parts[1], "%d", &c.MaxTokens)
-		fmt.Sscanf(parts[2], "%d", &c.Overlap)
+		_, _ = fmt.Sscanf(parts[1], "%d", &c.MaxTokens)
+		_, _ = fmt.Sscanf(parts[2], "%d", &c.Overlap)
 	}
 	if c.Strategy == "" {
 		return fallback
@@ -832,18 +832,6 @@ func jobEffectiveChunking(j *batchv1.Job, fallback ragv1alpha1.ChunkingSpec) rag
 // chunkingLabel serialises a chunking spec to a compact label value.
 func chunkingLabel(c ragv1alpha1.ChunkingSpec) string {
 	return fmt.Sprintf("%s|%d|%d", c.Strategy, c.MaxTokens, c.Overlap)
-}
-
-func jobEnvValue(j *batchv1.Job, name string) (string, bool) {
-	if len(j.Spec.Template.Spec.Containers) == 0 {
-		return "", false
-	}
-	for _, env := range j.Spec.Template.Spec.Containers[0].Env {
-		if env.Name == name {
-			return env.Value, true
-		}
-	}
-	return "", false
 }
 
 func setCondition(kb *ragv1alpha1.KnowledgeBase, condType string, status metav1.ConditionStatus, reason, msg string) {

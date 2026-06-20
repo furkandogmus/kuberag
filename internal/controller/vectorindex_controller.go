@@ -192,7 +192,7 @@ func (r *VectorIndexReconciler) probePgvector(ctx context.Context, vi *ragv1alph
 	if err != nil {
 		return probeResult{health: ragv1alpha1.IndexUnknown, message: fmt.Sprintf("pgvector: invalid DSN: %v", err)}
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -243,7 +243,6 @@ func (r *VectorIndexReconciler) probeMilvus(ctx context.Context, vi *ragv1alpha1
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Host == "" {
 		endpoint = "http://" + endpoint
-		parsed, _ = url.Parse(endpoint)
 	}
 
 	// Milvus serves a health endpoint; the collection describe API may vary.
