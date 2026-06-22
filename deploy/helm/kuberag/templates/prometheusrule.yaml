@@ -1,0 +1,12 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kuberag.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kuberag.labels" . | nindent 4 }}
+spec:
+  groups:
+    {{- include "kuberag.sloRules" . | nindent 4 }}
+{{- end }}

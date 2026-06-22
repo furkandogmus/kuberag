@@ -151,7 +151,7 @@ def _export_milvus(store) -> list[dict]:
         res = store.client.query(
             store.collection,
             filter="",
-            output_fields=["source", "doc_path", "text"],
+            output_fields=["id", "vector", "source", "doc_path", "text", "chunk_hash"],
             limit=batch,
             offset=offset,
         )

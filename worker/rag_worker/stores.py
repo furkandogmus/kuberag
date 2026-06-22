@@ -569,6 +569,7 @@ class MilvusStore(VectorStore):
             {
                 "id": p["id"], "vector": p["vector"], "source": p["payload"]["source"],
                 "doc_path": p["payload"]["doc_path"], "text": p["payload"]["text"],
+                "chunk_hash": p["payload"].get("chunk_hash", ""),
             }
             for p in points
         ]

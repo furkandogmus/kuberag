@@ -77,9 +77,13 @@ welcome.
 - Status print columns: Phase, Model, Chunks, Recall, LastIndexed (KB);
   Health, Points, Dim (VI); KB, Phase, Endpoint (Retriever)
 - Grafana dashboard + ServiceMonitor + Prometheus scrape annotations
+- Retriever Prometheus endpoint with request/error/latency/saturation metrics,
+  SLO dashboard panels, bundled PrometheusRule alerts, and a concurrent
+  dependency-free load-test harness
 
 ### CRD design
-- Three resources: `KnowledgeBase` (`kb`), `Retriever` (`rtr`), `VectorIndex` (`vi`)
+- Six resources: `KnowledgeBase` (`kb`), `Retriever` (`rtr`), `VectorIndex`
+  (`vi`), `IngestionRun`, `Backup`, and `Restore`
 - CEL validations: overlap < maxTokens, unique source names, backend block
   exclusivity, openai-compatible requires baseURL, cron pattern enforcement,
   Repo owner/name pattern, URL https scheme
@@ -156,8 +160,8 @@ welcome.
 
 ### Serving & retrieval
 - **Custom-metric Retriever autoscaling** — CPU-based HPA is managed by the
-  operator. Request-rate and query-latency metrics would make scaling more
-  workload-aware than CPU alone.
+  operator and request/latency/saturation metrics are now exported. Wiring
+  Prometheus Adapter metrics into HPA remains.
 - **Streaming generation (SSE)** — server-sent events for token-by-token LLM
   output, giving users progressive answer rendering.
 - **OpenShift Route support** — Kubernetes Ingress with TLS and OIDC is managed
@@ -178,12 +182,14 @@ welcome.
   same dataset and compare recall/latency/cost, surfacing the best pick.
 
 ### Observability & operations
-- **Distributed tracing** — OpenTelemetry spans across reconcile → Job → worker
-  → store, surfacing end-to-end ingestion and query latency.
+- **Store-level tracing** — OTLP propagation now connects reconcile → Job →
+  worker and Retriever query spans. Individual vector-store HTTP/SQL operations
+  still need child spans.
 - **Worker Job logs aggregation** — surface worker logs in `kubectl describe kb`
   or status conditions for faster debugging when an ingestion fails.
-- **SLO dashboards** — pre-built Grafana SLO panels for ingestion freshness
-  (time since last successful index) and retrieval latency percentiles.
+- **Per-KnowledgeBase freshness SLO** — namespace-level successful-ingestion
+  timestamps, dashboarding, and stale-ingestion alerts are bundled. A bounded
+  per-KB view requires an opt-in label allowlist or status exporter.
 
 ## Later
 
@@ -296,10 +302,10 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
 - **Operator metrics TLS/auth** — Retriever traffic can use managed
   Ingress/cert-manager TLS, but the operator metrics endpoint is still plain
   HTTP and should be isolated or protected by the platform.
-- **Distributed rate limiting** — each Retriever pod now has a bounded
-  per-client token bucket with 429/`Retry-After`, plus concurrency and body
-  limits. A shared Redis-backed limiter is still needed when strict quotas must
-  span all replicas.
+- **Distributed rate limiting** — the default bounded token bucket remains
+  per-pod, while an optional Secret-backed Redis backend applies one atomic
+  server-time quota across all replicas and fails closed on backend outages.
+  Redis Cluster/Sentinel topology drills remain.
 - **Dependency pinning policy** — `setuptools==80.10.2` is pinned because
   pymilvus breaks on 81+. That pin carries known CVEs (currently
   accepted via `pip-audit || true` in CI). Production should either
@@ -315,12 +321,10 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
 
 ### Observability & operations
 
-- **Load / benchmark suite** — no benchmarks for ingest Job throughput
-  (chunks/sec, MB/sec source), retriever p50/p95/p99 latency under
-  concurrent load, or controller reconcile throughput. Defaults
-  (`BatchSize=64`, `ActiveDeadline=7200s`, `resources: 1 CPU / 4Gi`) are
-  unverified. Production needs a k6 / vegeta harness backed by
-  Prometheus assertions.
+- **Ingest/controller benchmark suite** — Retriever concurrency, throughput,
+  error rate, and p50/p95/p99 latency now have a repeatable load harness and
+  Prometheus metrics. Ingest chunks/sec, MB/sec, and controller reconcile
+  throughput benchmarks are still missing.
 - **Property-based testing** — `chunking.py` and `embeddings.py` accept
   arbitrary text inputs (empty, 10 MB, pure whitespace, control
   characters). No Hypothesis / `testing/quick` coverage. Production
@@ -332,38 +336,36 @@ with sensitive data. Some of these are tracked elsewhere on this roadmap
   every 60s. With 1000 KBs, that's 17 req/s of small HTTP calls. Should
   be batched (e.g. one probe per store, returning health for all
   collections).
-- **SLO dashboards** — already on "Near term". Need: ingestion
-  freshness (time since last successful index), recall percentiles,
-  retriever p99 latency, error rates, saturation. Without SLOs
-  defined, on-call can't make paging decisions.
+- **Per-KnowledgeBase freshness SLO** — Retriever and namespace-level ingestion
+  SLOs now have dashboard panels and alerts. Per-KB freshness remains excluded
+  by the default cardinality budget.
 - **Audit log shipping** — operator lifecycle events (KB created /
 
 ### Resilience
 
-- **Worker pod preemption tolerance** — workers run with `RestartPolicy
-  = Never` and no checkpoint. A 2-hour spot preemption wastes 2 hours
-  of embedding cost. Need checkpoint / resume so an interrupted Job
-  can pick up from the last persisted offset.
-- **Backpressure on overlapping ingestions** — if a freshness cron
-  fires while a manual ingestion is running, today the manual one
-  wins (it's the `ActiveJob`). The cron should defer to the next tick,
-  not get dropped silently. Need a queueing strategy.
+- **Worker pod preemption tolerance** — full ingestions persist completed-source
+  checkpoints and the next Job resumes without re-embedding those sources.
+  File/batch-level checkpoints are still needed to avoid repeating the current
+  large source after preemption.
+- **Backpressure on overlapping ingestions** — freshness triggers that arrive
+  during an active Job are recorded and run after it settles instead of being
+  silently dropped. A general multi-trigger queue is still out of scope.
 
 ### Multi-tenant & deployment
 
-- **Single deployment surface** — today both `make deploy` (Kustomize)
-  and the Helm chart exist; the chart is the recommended one but
-  Kustomize is what the local demo uses. Pick one and deprecate the
-  other; current state is "neither is fully tested in CI".
+- **Single deployment surface** — Helm is the recommended production surface;
+  Helm contracts and Kustomize rendering are both tested in CI. Kustomize
+  remains the development/demo base, so versioned release support and
+  deprecation ownership still need to be explicit.
 - **Cross-namespace references** — `Retriever.Spec.KnowledgeBaseRef`
   must be same-namespace, with no CEL or webhook enforcement (just a
   comment). For multi-tenant deployments, allow a Retriever in
   namespace A to mount a KB in namespace B, gated by an explicit
   `crossNamespaceRefs: true` flag and per-tenant RBAC.
-- **Disaster recovery / backup** — the vector store is the source of
-  truth, but there's no documented procedure for rebuilding from
-  scratch. Need a `kuberag backup` / `restore` workflow that exports
-  collection state to object storage and re-ingests on demand.
+- **Disaster recovery / backup** — `Backup` and `Restore` CRDs export vector
+  points to S3-compatible object storage and restore through a verified staging
+  collection with atomic promotion. Scheduling, retention, encryption/KMS,
+  cross-cluster portability, and a real-store end-to-end restore drill remain.
 - **Worker network identity** — Kubernetes API access is isolated per KB, but
   network egress is still shared unless per-KB NetworkPolicies are configured.
 
@@ -374,16 +376,17 @@ Python mock / k3d e2e) does not cover. These are not about new
 features; they are about confidence in what's already built.
 
 - **Helm chart test** — `helm lint` is in CI (`make lint-helm`);
-  `helm unittest` (template rendering + assertion tests) is not
-  yet added. Template regressions in `_helpers.tpl` or omitted
-  RBAC rules are not caught unless someone tries to deploy.
-- **Upgrade test** — a KB created with v0.3 must survive a
-  v0.3 → v0.4 upgrade (CRD schema migration, stored-version
-  change, controller rolling update mid-reconcile). Today no
-  such test exists; only green-field installs are exercised.
-- **Multi-replica operator** — leader election is wired up but
-  no integration or e2e test runs with `replicas > 1`. A
-  leader-handoff mid-ingestion has never been validated.
+  rendered resource contracts now verify cluster/namespace RBAC scope,
+  WATCH_NAMESPACE wiring, image overrides, restricted security defaults,
+  PDB/PriorityClass, NetworkPolicies, ServiceMonitors, and PrometheusRule
+  alerts. A chart-testing install test against a disposable cluster remains.
+- **Upgrade test** — envtest covers resource round-trips, stored-version/status
+  behavior, active-Job recovery, and Helm render/RBAC upgrade contracts. A true
+  previous-release → current-release cluster upgrade with old CRDs and binaries
+  remains.
+- **Multi-replica operator** — lease objects and reconcile recovery are covered,
+  but no integration/e2e test runs two live managers and kills the elected
+  leader during ingestion. True leader handoff remains unverified.
 - **pgvector e2e** — the k3d e2e test only deploys Qdrant.
   pgvector (and Milvus) are not exercised end-to-end.
 - **Auto-tune e2e assertion** — the e2e test waits for
@@ -398,10 +401,10 @@ features; they are about confidence in what's already built.
   same `KnowledgeBase`. The e2e only indexes one GitHub repo.
   Source-index cross-talk (e.g. S3 key mangles GitHub
   revision) is untested.
-- **Chaos test** — kill the operator mid-ingestion /
-  mid-eval / mid-cleanup and assert the cluster converges
-  to the expected state. Validates finalizer safety,
-  `ActiveJob` recovery, and the stale-Job detection timer.
+- **Chaos test** — envtest simulates failed/stale ingestion and pre-existing
+  cleanup Jobs, verifying state/finalizer recovery. Process-level operator
+  kills, mid-evaluation recovery, node loss, and network partitions still need
+  a disposable-cluster chaos suite.
 - **Multi-arch e2e** — arm64 worker/retriever images are
   built and published but never tested on arm64 hardware or
   emulation.
@@ -416,44 +419,43 @@ features; they are about confidence in what's already built.
   covers Python; Go's `stdlib` and `k8s.io/*` dependencies are
   not scanned. `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
   is a single CI step.
-- **Image signing and policy enforcement** — release builds now publish
-  BuildKit SBOM and maximum-mode provenance attestations for all three images.
-  Keyless `cosign` signing and a cluster admission policy that rejects unsigned
-  images are still required for end-to-end supply-chain enforcement.
-- **Operator HA validation** — the Helm chart now installs an operator PDB and
-  leader election is enabled, but multi-replica leader handoff still needs an
-  end-to-end test before claiming highly available operation.
-- **Pod Security Standards** — `restricted` profile
-  compatibility is not verified. The Pod spec uses
-  `securityContext` drops and `readOnlyRootFilesystem` but
-  `allowPrivilegeEscalation`, `/proc` mount, and
-  `seLinuxOptions` are not checked against the restricted
-  profile.
-- **Metrics cardinality** — the `knowledgebase` label on every
-  Prometheus metric is unbounded. With 10,000 KBs, each gauge
-  generates 10,000 time-series. Must either switch to
-  per-namespace aggregation or use `k8s.io/component-base`
-  `metrics` with label-allowlist enforcement.
-- **Log sampling / rate limiting** — worker pods log
-  verbosely; in a busy cluster the per-pod log volume can
-  overload the kubelet and the API server's log tailer. The
-  worker should implement a burst-token log limiter.
-- **CRD pruning** — kubebuilder CRDs use `preserveUnknownFields:
-  false` by default, which means unknown fields are pruned at
-  admission. An explicit test with `kubectl apply --validate=strict`
-  submitting a KB with a typo'd field should verify the field
-  is silently dropped and the controller still reconciles.
-- **Resource quota compatibility** — create a `ResourceQuota`
-  in the namespace and deploy a KB. The operator's
-  `EnsureIngestionRun` / `EnsureVectorIndex` / `CreateJob`
-  calls must handle `Forbidden: exceeded quota` with a
-  condition on the KB rather than a controller loop error.
-  Untested today.
-- **ConfigMap 1MB limit** — the worker spec is mounted as a
-  `ConfigMap`. A KB with many `includeGlobs` or a large web
-  crawl URL list can exceed the 1 MiB ConfigMap size limit.
-  A size guard and/or split-to-secret fallback are needed.
-  Uncovered by any test today.
+- **Image signing and policy enforcement** — release builds publish BuildKit
+  SBOM and maximum-mode provenance attestations and keylessly sign all three
+  image digests with `cosign`. A Kyverno v1.18+
+  `ImageValidatingPolicy` example verifies the exact GitHub Actions workflow
+  identity, requires Rekor transparency-log validation, mutates tags to
+  digests, and rejects unsigned images. An end-to-end admission test remains.
+- **Operator HA validation** — the Helm chart installs an operator PDB, leader
+  election is enabled, and lease/recovery behavior has envtest coverage. A
+  two-manager process-level leader-handoff test remains before claiming HA.
+- **Pod Security Standards** — generated ingest/backup/restore Jobs,
+  Retriever Deployments (including the OIDC sidecar), Helm defaults, and the
+  static manager manifest are regression-tested for the `restricted` profile:
+  non-root execution, RuntimeDefault seccomp, no privilege escalation, dropped
+  capabilities, read-only roots, and no host namespace/hostPath use. A real
+  namespace with `pod-security.kubernetes.io/enforce=restricted` remains as an
+  end-to-end admission test.
+- **Metrics cardinality policy** — operator metrics now aggregate by namespace
+  and Retriever metrics use only bounded result/reason labels. The series
+  budget is documented, operator descriptors are regression-tested for
+  forbidden labels, and unexpected Retriever values collapse to `other`.
+- **Log sampling / rate limiting** — worker logs use a bounded token bucket
+  (30-message burst per 10 seconds) with regression coverage. Structured log
+  levels and a configurable policy remain future improvements.
+- **CRD pruning** — envtest submits an unstructured KnowledgeBase with a
+  typo'd field, verifies API-server pruning on read-back, and confirms the
+  controller still reconciles the resource.
+- **Resource quota compatibility** — quota and LimitRange create failures are
+  surfaced as a `ResourceQuotaExceeded` condition with bounded retries instead
+  of controller-loop errors. Unit coverage verifies the ConfigMap rejection
+  path and distinguishes quota failures from ordinary RBAC denials. A real
+  namespace-level ResourceQuota end-to-end test remains.
+- **ConfigMap 1MB limit** — ingestion now fails fast with a
+  `SpecConfigTooLarge` condition and suppresses retries until the
+  `KnowledgeBase` generation changes. Eval/restore serialize only embedding
+  and vector-store fields; cleanup/backup serialize only vector-store fields,
+  so large source lists do not affect those Jobs. Admission-time size feedback
+  and an end-to-end oversized-object test remain.
 #### Quick wins (this iteration, sub-1-hour each)
 - **`govulncheck` CI step** — Go vulnerability scanning (advisory).
 - **`helm lint` in CI** — + `make lint-helm` Makefile target.

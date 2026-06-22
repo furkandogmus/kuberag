@@ -87,7 +87,7 @@ func (r *BackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	if bkp.Status.ActiveJob == "" {
-		backupID := fmt.Sprintf("%d", time.Now().Unix())
+		backupID := fmt.Sprintf("%d", time.Now().UnixNano())
 		bkp.Status.BackupID = backupID
 
 		job, specJSON, err := buildBackupJob(ctx, &kb, &bkp, backupID)

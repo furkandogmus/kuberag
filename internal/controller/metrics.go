@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"sync"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -20,6 +23,16 @@ var (
 		prometheus.GaugeOpts{
 			Name: "rag_knowledgebase_indexed_chunks",
 			Help: "Number of chunks currently indexed.",
+		},
+		[]string{"namespace"},
+	)
+
+	// lastSuccessfulIngestionTimestamp reports the latest successful ingestion
+	// observed in a namespace. Namespace aggregation keeps cardinality bounded.
+	lastSuccessfulIngestionTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "rag_knowledgebase_last_successful_ingestion_timestamp_seconds",
+			Help: "Unix timestamp of the latest successful KnowledgeBase ingestion in the namespace.",
 		},
 		[]string{"namespace"},
 	)
@@ -61,11 +74,26 @@ var (
 		},
 		[]string{"namespace", "result"},
 	)
+
+	freshnessMu                        sync.Mutex
+	lastSuccessfulIngestionByNamespace = map[string]int64{}
 )
 
 func init() {
 	metrics.Registry.MustRegister(
-		ingestionsTotal, indexedChunks, retrievalRecall, autoTuneAttempts, autoTuneBestRecall,
+		ingestionsTotal, indexedChunks, lastSuccessfulIngestionTimestamp,
+		retrievalRecall, autoTuneAttempts, autoTuneBestRecall,
 		autoTuneDurationSeconds,
 	)
+}
+
+func observeSuccessfulIngestion(namespace string, timestamp time.Time) {
+	seconds := timestamp.Unix()
+	freshnessMu.Lock()
+	defer freshnessMu.Unlock()
+	if lastSuccessfulIngestionByNamespace[namespace] >= seconds {
+		return
+	}
+	lastSuccessfulIngestionByNamespace[namespace] = seconds
+	lastSuccessfulIngestionTimestamp.WithLabelValues(namespace).Set(float64(seconds))
 }

@@ -1229,6 +1229,15 @@ spec:
                 description: RateLimit enables per-client request throttling. Omit
                   to disable.
                 properties:
+                  backend:
+                    default: local
+                    description: |-
+                      Backend selects the limiter state store. "local" is per-pod; "redis"
+                      enforces one quota across all Retriever replicas.
+                    enum:
+                    - local
+                    - redis
+                    type: string
                   burst:
                     default: 20
                     description: Burst is the maximum number of immediately available
@@ -1236,12 +1245,42 @@ spec:
                     maximum: 10000
                     minimum: 1
                     type: integer
+                  clientIdentityHeader:
+                    description: |-
+                      ClientIdentityHeader optionally selects a trusted proxy-injected header
+                      (for example X-Forwarded-Email from the managed OIDC proxy) as the limiter
+                      identity. Configure this only when direct access to the Retriever port is
+                      blocked and the proxy overwrites the header.
+                    maxLength: 128
+                    pattern: ^[A-Za-z0-9-]+$
+                    type: string
                   enabled:
                     default: true
                     description: |-
                       Enabled turns rate limiting on. When disabled, RequestsPerMinute and Burst
                       are ignored.
                     type: boolean
+                  redisKeyPrefix:
+                    default: kuberag:ratelimit
+                    description: |-
+                      RedisKeyPrefix isolates limiter keys when multiple applications share a
+                      Redis deployment.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  redisURLSecretRef:
+                    description: |-
+                      RedisURLSecretRef references a redis:// or rediss:// URL. Required when
+                      backend is redis. Keep credentials in the Secret value, not the CR.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
                   requestsPerMinute:
                     default: 60
                     description: RequestsPerMinute is the sustained request rate allowed
@@ -1250,6 +1289,9 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+                x-kubernetes-validations:
+                - message: redisURLSecretRef is required when backend is redis
+                  rule: self.backend != 'redis' || has(self.redisURLSecretRef)
               replicas:
                 default: 1
                 description: Replicas of the retriever server.

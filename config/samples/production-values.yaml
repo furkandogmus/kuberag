@@ -1,0 +1,52 @@
+# Reference production Helm values. Replace image.tag with a signed immutable
+# sha-* tag from the release workflow before installation.
+replicaCount: 2
+
+image:
+  repository: ghcr.io/furkandogmus/kuberag
+  tag: sha-REPLACE_ME
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+rbac:
+  create: true
+  scope: namespace
+  watchNamespace: tenant-prod
+
+worker:
+  namespaces:
+    - tenant-prod
+  rbac:
+    create: false
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+metrics:
+  service:
+    port: 8080
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+  retrieverServiceMonitor:
+    enabled: true
+    interval: 30s
+  prometheusRule:
+    enabled: true
+    ingestionFreshnessSeconds: 86400
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+terminationGracePeriodSeconds: 60

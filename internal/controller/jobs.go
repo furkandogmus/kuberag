@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -334,7 +335,7 @@ func buildIngestJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, hash, se
 // buildEvalJob renders the retrieval-quality evaluation Job. The round counter
 // makes each evaluation a fresh Job (the spec hash is stable across evals).
 func buildEvalJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, hash, secretsHash string, round int, effChunking ragv1alpha1.ChunkingSpec) (*batchv1.Job, string, error) {
-	specJSON, err := marshalEffectiveSpec(kb, effChunking)
+	specJSON, err := marshalQuerySpec(kb)
 	if err != nil {
 		return nil, "", err
 	}
@@ -354,7 +355,7 @@ func buildEvalJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, hash, secr
 
 // buildCleanupJob renders the teardown Job that drops the remote collection.
 func buildCleanupJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, secretsHash string) (*batchv1.Job, string, error) {
-	specJSON, err := marshalEffectiveSpec(kb, effectiveChunking(kb))
+	specJSON, err := marshalStoreSpec(kb)
 	if err != nil {
 		return nil, "", err
 	}
@@ -385,6 +386,36 @@ func marshalEffectiveSpec(kb *ragv1alpha1.KnowledgeBase, effChunking ragv1alpha1
 	return string(b), nil
 }
 
+// marshalQuerySpec emits only the fields needed to embed a query and connect
+// to the vector store. This keeps eval/restore ConfigMaps independent of large
+// source lists and include globs.
+func marshalQuerySpec(kb *ragv1alpha1.KnowledgeBase) (string, error) {
+	embedding := kb.Spec.Embedding.DeepCopy()
+	if embedding.Dimension == 0 {
+		embedding.Dimension = embeddingDimension(kb.Spec.Embedding)
+	}
+	spec := struct {
+		Embedding   ragv1alpha1.EmbeddingSpec   `json:"embedding"`
+		VectorStore ragv1alpha1.VectorStoreSpec `json:"vectorStore"`
+	}{
+		Embedding:   *embedding,
+		VectorStore: kb.Spec.VectorStore,
+	}
+	b, err := json.Marshal(spec)
+	return string(b), err
+}
+
+// marshalStoreSpec emits the minimum cleanup/backup configuration.
+func marshalStoreSpec(kb *ragv1alpha1.KnowledgeBase) (string, error) {
+	spec := struct {
+		VectorStore ragv1alpha1.VectorStoreSpec `json:"vectorStore"`
+	}{
+		VectorStore: kb.Spec.VectorStore,
+	}
+	b, err := json.Marshal(spec)
+	return string(b), err
+}
+
 // priorSourcesJSON serializes last-synced revisions so the worker can do incremental
 // sync. It also merges in LastCheckpoint so a resume after failure skips already-
 // completed sources.
@@ -406,18 +437,24 @@ func priorSourcesJSON(kb *ragv1alpha1.KnowledgeBase) string {
 }
 
 func truncName(name string) string {
-	if len(name) > 63 {
-		return name[:63]
+	if len(name) <= 63 {
+		return name
 	}
-	return name
+	sum := sha256.Sum256([]byte(name))
+	hash := fmt.Sprintf("%x", sum[:4])
+	prefix := strings.TrimRight(name[:63-1-len(hash)], "-")
+	return prefix + "-" + hash
 }
 
 func nameWithSuffix(name, suffix string) string {
-	maxBase := 63 - len(suffix)
-	if len(name) > maxBase {
-		name = strings.TrimRight(name[:maxBase], "-")
+	if len(name)+len(suffix) <= 63 {
+		return name + suffix
 	}
-	return name + suffix
+	sum := sha256.Sum256([]byte(name + suffix))
+	hash := fmt.Sprintf("%x", sum[:4])
+	maxBase := 63 - len(suffix) - 1 - len(hash)
+	base := strings.TrimRight(name[:maxBase], "-")
+	return base + "-" + hash + suffix
 }
 
 func defaultInt(v, def int) int {

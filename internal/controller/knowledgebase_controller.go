@@ -61,6 +61,9 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, &kb); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if kb.Status.LastIndexedTime != nil {
+		observeSuccessfulIngestion(kb.Namespace, kb.Status.LastIndexedTime.Time)
+	}
 
 	tracer := otel.Tracer("kuberag")
 	ctx, span := tracer.Start(ctx, "KnowledgeBase.Reconcile",
@@ -213,6 +216,9 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if retryAfter := ingestFailureRetryAfter(&kb, chash, time.Now()); retryAfter > 0 {
 		return ctrl.Result{RequeueAfter: retryAfter}, nil
+	}
+	if specConfigTooLargeUnchanged(&kb) {
+		return ctrl.Result{}, nil
 	}
 
 	// 1) Ingestion takes priority over evaluation.

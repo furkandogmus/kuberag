@@ -6,10 +6,23 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from rag_worker import common
 from rag_worker.common import write_result
 
 
 class TestWriteResult(unittest.TestCase):
+    def test_worker_logs_are_burst_limited(self):
+        common._log_tokens = common._log_burst
+        common._log_last = 100.0
+        with (
+            patch.object(common.time, "monotonic", return_value=100.0),
+            patch("builtins.print") as output,
+        ):
+            for index in range(common._log_burst + 5):
+                common.log(f"message-{index}")
+
+        self.assertEqual(output.call_count, common._log_burst)
+
     def test_replaces_operator_precreated_configmap(self):
         api = MagicMock()
         client = types.SimpleNamespace(

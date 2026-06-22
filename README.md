@@ -224,6 +224,13 @@ Namespace scope limits the running operator; CRD installation itself remains a
 cluster-level action and therefore still requires cluster-admin installation
 permissions.
 
+For a hardened baseline with PSS, quotas, NetworkPolicies, Prometheus,
+OIDC/TLS, external Qdrant credentials, and Redis-backed distributed rate
+limiting, start from
+`config/samples/production-values.yaml` and
+`config/samples/production-reference.yaml`. Replace all `sha-REPLACE_ME`
+placeholders with signed release image tags first.
+
 Or run the whole thing on a throwaway k3d cluster with one command:
 
 ```bash

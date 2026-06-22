@@ -225,15 +225,17 @@ Production should add:
 
 ### Traces
 
-Operator → worker → store spans are not yet wired. When added
-(see `ROADMAP.md`), use OpenTelemetry SDK with a gRPC OTLP
-exporter to a Tempo / Jaeger collector.
+W3C trace context now propagates from controller reconciles into worker Jobs,
+and both workers and Retrievers can export OTLP/gRPC spans to Tempo, Jaeger, or
+another collector. Individual vector-store HTTP/SQL calls are not yet wrapped
+in child spans.
 
 ### Logs
 
-Operator and worker emit JSON-structured logs (via `logr` and
-Python's `logging` with a JSON formatter). Forward to Loki or
-Elasticsearch via a DaemonSet (Fluent Bit, Vector).
+The operator emits structured `logr` records. Python workers emit prefixed
+single-line records through a bounded burst limiter. Forward stdout/stderr to
+Loki or Elasticsearch via a node agent such as Fluent Bit or Vector; parse the
+worker prefix when structured fields are required.
 
 ## Backup and disaster recovery
 
@@ -302,6 +304,13 @@ For shared clusters with multiple teams:
 
 ## Example manifests
 
-A full production manifest (Helm values + custom resources) is
-in `config/samples/production-reference.yaml` (TODO: write this
-when the production-readiness items in `ROADMAP.md` ship).
+A production baseline is provided as:
+
+- `config/samples/production-values.yaml` — namespace-scoped Helm install,
+  two leader-elected replicas, PDB, NetworkPolicies, and Prometheus resources.
+- `config/samples/production-reference.yaml` — restricted tenant namespace,
+  quota/limits, external authenticated Qdrant, scheduled KnowledgeBase, and an
+  autoscaled OIDC/TLS Retriever.
+
+Replace every `sha-REPLACE_ME` with a signed immutable release tag and create
+the referenced Secrets before applying.

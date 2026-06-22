@@ -110,6 +110,13 @@ func (r *RetrieverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.applyService(ctx, svc); err != nil {
 		return ctrl.Result{}, err
 	}
+	metricsSvc := r.desiredMetricsService(&rt)
+	if err := controllerutil.SetControllerReference(&rt, metricsSvc, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.applyService(ctx, metricsSvc); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.reconcileIngress(ctx, &rt); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -185,6 +192,11 @@ func (r *RetrieverReconciler) computeSecretsHash(ctx context.Context, rt *ragv1a
 	if rt.Spec.APIKeySecretRef != nil {
 		appendSecretHash(ctx, r.Client, rt.Namespace, "retriever.apiKey", rt.Spec.APIKeySecretRef, hasher)
 	}
+	if rt.Spec.RateLimit != nil &&
+		rt.Spec.RateLimit.Backend == "redis" &&
+		rt.Spec.RateLimit.RedisURLSecretRef != nil {
+		appendSecretHash(ctx, r.Client, rt.Namespace, "rateLimit.redisURL", rt.Spec.RateLimit.RedisURLSecretRef, hasher)
+	}
 	if rt.Spec.OIDC != nil {
 		appendSecretHash(ctx, r.Client, rt.Namespace, "oidc.clientID", &rt.Spec.OIDC.ClientIDSecretRef, hasher)
 		appendSecretHash(ctx, r.Client, rt.Namespace, "oidc.clientSecret", &rt.Spec.OIDC.ClientSecretSecretRef, hasher)
@@ -255,6 +267,12 @@ func (r *RetrieverReconciler) validateRetrieverSecrets(ctx context.Context, rt *
 		{"vector store credentials", kb.Spec.VectorStore.CredentialsSecretRef},
 		{"embedding API key", kb.Spec.Embedding.APIKeySecretRef},
 		{"retriever API key", rt.Spec.APIKeySecretRef},
+	}
+	if rt.Spec.RateLimit != nil && rt.Spec.RateLimit.Backend == "redis" {
+		refs = append(refs, struct {
+			label string
+			ref   *ragv1alpha1.SecretKeyRef
+		}{"rate-limit Redis URL", rt.Spec.RateLimit.RedisURLSecretRef})
 	}
 	if rt.Spec.Generation != nil {
 		refs = append(refs, struct {
@@ -368,11 +386,25 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 		{Name: "MAX_REQUEST_BODY_BYTES", Value: fmt.Sprintf("%d", defaultInt64(rt.Spec.MaxRequestBodyBytes, 1048576))},
 	}
 	if rate := rt.Spec.RateLimit; rate != nil && boolPtrVal(rate.Enabled, true) {
+		backend := rate.Backend
+		if backend == "" {
+			backend = "local"
+		}
+		keyPrefix := rate.RedisKeyPrefix
+		if keyPrefix == "" {
+			keyPrefix = "kuberag:ratelimit"
+		}
 		env = append(env,
 			corev1.EnvVar{Name: "RATE_LIMIT_ENABLED", Value: "true"},
 			corev1.EnvVar{Name: "RATE_LIMIT_REQUESTS_PER_MINUTE", Value: fmt.Sprintf("%d", defaultInt(rate.RequestsPerMinute, 60))},
 			corev1.EnvVar{Name: "RATE_LIMIT_BURST", Value: fmt.Sprintf("%d", defaultInt(rate.Burst, 20))},
+			corev1.EnvVar{Name: "RATE_LIMIT_BACKEND", Value: backend},
+			corev1.EnvVar{Name: "RATE_LIMIT_REDIS_KEY_PREFIX", Value: keyPrefix},
+			corev1.EnvVar{Name: "RATE_LIMIT_CLIENT_ID_HEADER", Value: rate.ClientIdentityHeader},
 		)
+		if backend == "redis" && rate.RedisURLSecretRef != nil {
+			env = append(env, secretEnv("RATE_LIMIT_REDIS_URL", rate.RedisURLSecretRef))
+		}
 	}
 	if kb.Spec.VectorStore.CredentialsSecretRef != nil {
 		env = append(env, secretEnv("VECTORSTORE_CREDENTIAL", kb.Spec.VectorStore.CredentialsSecretRef))
@@ -404,7 +436,11 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 
 	env = append(env, scratchEnv()...)
 	// Disable playground ingest endpoints in production deployments.
-	env = append(env, corev1.EnvVar{Name: "DISABLE_PLAYGROUND_INGEST", Value: "true"})
+	env = append(env,
+		corev1.EnvVar{Name: "DISABLE_PLAYGROUND_INGEST", Value: "true"},
+		corev1.EnvVar{Name: "METRICS_ENABLED", Value: "true"},
+		corev1.EnvVar{Name: "METRICS_PORT", Value: "9090"},
+	)
 
 	var resources corev1.ResourceRequirements
 	if rt.Spec.Resources != nil {
@@ -426,7 +462,10 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 			Name:            "retriever",
 			Image:           retrieverImage(rt),
 			ImagePullPolicy: corev1.PullIfNotPresent,
-			Ports:           []corev1.ContainerPort{{ContainerPort: 8000, Name: "http"}},
+			Ports: []corev1.ContainerPort{
+				{ContainerPort: 8000, Name: "http"},
+				{ContainerPort: 9090, Name: "metrics"},
+			},
 			Env:             env,
 			Resources:       resources,
 			SecurityContext: hardenedContainerSecurityContext(),
@@ -434,7 +473,7 @@ func (r *RetrieverReconciler) desiredDeployment(rt *ragv1alpha1.Retriever, kb *r
 			ReadinessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/healthz",
+						Path: "/readyz",
 						Port: intstr.FromInt32(8000),
 					},
 				},
@@ -598,6 +637,38 @@ func (r *RetrieverReconciler) desiredService(rt *ragv1alpha1.Retriever) *corev1.
 	}
 }
 
+func (r *RetrieverReconciler) desiredMetricsService(rt *ragv1alpha1.Retriever) *corev1.Service {
+	selector := map[string]string{
+		labelManagedBy:             "kuberag",
+		"rag.furkan.dev/retriever": rt.Name,
+	}
+	labels := map[string]string{
+		labelManagedBy:                "kuberag",
+		"app.kubernetes.io/component": "retriever-metrics",
+		"rag.furkan.dev/retriever":    rt.Name,
+	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rt.Name + "-retriever-metrics",
+			Namespace: rt.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"prometheus.io/scrape": "true",
+				"prometheus.io/port":   "9090",
+				"prometheus.io/path":   "/metrics",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: selector,
+			Ports: []corev1.ServicePort{{
+				Name:       "metrics",
+				Port:       9090,
+				TargetPort: intstr.FromInt32(9090),
+			}},
+		},
+	}
+}
+
 func (r *RetrieverReconciler) reconcileIngress(ctx context.Context, rt *ragv1alpha1.Retriever) error {
 	key := types.NamespacedName{Namespace: rt.Namespace, Name: rt.Name + "-retriever"}
 	if rt.Spec.Ingress == nil {
@@ -686,6 +757,7 @@ func (r *RetrieverReconciler) reconcileOIDCNetworkPolicy(ctx context.Context, rt
 		"rag.furkan.dev/retriever": rt.Name,
 	}
 	proxyPort := intstr.FromInt32(4180)
+	metricsPort := intstr.FromInt32(9090)
 	protocol := corev1.ProtocolTCP
 	policy := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: labels},
@@ -696,6 +768,9 @@ func (r *RetrieverReconciler) reconcileOIDCNetworkPolicy(ctx context.Context, rt
 				Ports: []networkingv1.NetworkPolicyPort{{
 					Protocol: &protocol,
 					Port:     &proxyPort,
+				}, {
+					Protocol: &protocol,
+					Port:     &metricsPort,
 				}},
 			}},
 		},
@@ -835,6 +910,8 @@ func (r *RetrieverReconciler) applyService(ctx context.Context, svc *corev1.Serv
 		return err
 	}
 	// Preserve immutable/cluster-assigned fields; only sync selector and ports.
+	existing.Labels = svc.Labels
+	existing.Annotations = svc.Annotations
 	existing.Spec.Selector = svc.Spec.Selector
 	existing.Spec.Ports = svc.Spec.Ports
 	return r.Update(ctx, &existing)
@@ -898,6 +975,12 @@ func (r *RetrieverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				var reqs []reconcile.Request
 				for _, rt := range list.Items {
 					referenced := rt.Spec.APIKeySecretRef != nil && rt.Spec.APIKeySecretRef.Name == secret.Name
+					if rt.Spec.RateLimit != nil &&
+						rt.Spec.RateLimit.Backend == "redis" &&
+						rt.Spec.RateLimit.RedisURLSecretRef != nil &&
+						rt.Spec.RateLimit.RedisURLSecretRef.Name == secret.Name {
+						referenced = true
+					}
 					if rt.Spec.Generation != nil && rt.Spec.Generation.APIKeySecretRef != nil && rt.Spec.Generation.APIKeySecretRef.Name == secret.Name {
 						referenced = true
 					}

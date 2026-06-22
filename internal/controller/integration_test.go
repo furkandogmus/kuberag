@@ -592,6 +592,31 @@ func TestRetrieverCreatesServingWorkload(t *testing.T) {
 		if len(dep.Spec.Template.Spec.Containers) != 2 || dep.Spec.Template.Spec.Containers[1].Name != "oauth2-proxy" {
 			return fmt.Errorf("oauth2-proxy sidecar missing: %#v", dep.Spec.Template.Spec.Containers)
 		}
+		retrieverContainer := dep.Spec.Template.Spec.Containers[0]
+		hasMetricsPort := false
+		hasMetricsEnv := false
+		for _, port := range retrieverContainer.Ports {
+			if port.Name == "metrics" && port.ContainerPort == 9090 {
+				hasMetricsPort = true
+			}
+		}
+		for _, env := range retrieverContainer.Env {
+			if env.Name == "METRICS_ENABLED" && env.Value == "true" {
+				hasMetricsEnv = true
+			}
+		}
+		if !hasMetricsPort || !hasMetricsEnv {
+			return fmt.Errorf("retriever metrics port/env missing")
+		}
+		var metricsSvc corev1.Service
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "served-retriever-metrics"}, &metricsSvc); err != nil {
+			return err
+		}
+		if len(metricsSvc.Spec.Ports) != 1 ||
+			metricsSvc.Spec.Ports[0].Port != 9090 ||
+			metricsSvc.Annotations["prometheus.io/scrape"] != "true" {
+			return fmt.Errorf("unexpected retriever metrics Service: %#v", metricsSvc)
+		}
 		var ingress networkingv1.Ingress
 		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "served-retriever"}, &ingress); err != nil {
 			return err
@@ -606,7 +631,7 @@ func TestRetrieverCreatesServingWorkload(t *testing.T) {
 			return err
 		}
 		if len(networkPolicy.Spec.Ingress) != 1 ||
-			len(networkPolicy.Spec.Ingress[0].Ports) != 1 ||
+			len(networkPolicy.Spec.Ingress[0].Ports) != 2 ||
 			networkPolicy.Spec.Ingress[0].Ports[0].Port == nil ||
 			networkPolicy.Spec.Ingress[0].Ports[0].Port.IntVal != 4180 {
 			return fmt.Errorf("OIDC network policy does not isolate the upstream: %#v", networkPolicy.Spec)
@@ -696,6 +721,63 @@ func TestRetrieverWaitsForReferencedSecret(t *testing.T) {
 			return fmt.Errorf("unexpected condition after Secret deletion: %v", cond)
 		}
 		return nil
+	})
+}
+
+func TestRetrieverRedisRateLimitSecretWatch(t *testing.T) {
+	ns := newNamespace(t)
+	if err := k8sClient.Create(testCtx, sampleKB(ns, "redis-gated")); err != nil {
+		t.Fatalf("create kb: %v", err)
+	}
+	rt := &ragv1alpha1.Retriever{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis-gated", Namespace: ns},
+		Spec: ragv1alpha1.RetrieverSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: "redis-gated"},
+			Replicas:         2,
+			RateLimit: &ragv1alpha1.RateLimitSpec{
+				Enabled:           boolPtr(true),
+				Backend:           "redis",
+				RedisURLSecretRef: &ragv1alpha1.SecretKeyRef{Name: "redis-url", Key: "url"},
+			},
+		},
+	}
+	if err := k8sClient.Create(testCtx, rt); err != nil {
+		t.Fatalf("create retriever: %v", err)
+	}
+
+	eventually(t, 15*time.Second, func() error {
+		var got ragv1alpha1.Retriever
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(rt), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, ragv1alpha1.ConditionAvailable)
+		if condition == nil || condition.Reason != "SecretNotFound" {
+			return fmt.Errorf("unexpected condition: %v", condition)
+		}
+		return nil
+	})
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis-url", Namespace: ns},
+		Data:       map[string][]byte{"url": []byte("rediss://redis.example:6379/0")},
+	}
+	if err := k8sClient.Create(testCtx, secret); err != nil {
+		t.Fatalf("create Redis Secret: %v", err)
+	}
+	eventually(t, 15*time.Second, func() error {
+		var deployment appsv1.Deployment
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "redis-gated-retriever"}, &deployment); err != nil {
+			return err
+		}
+		for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+			if env.Name == "RATE_LIMIT_REDIS_URL" &&
+				env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == secret.Name {
+				return nil
+			}
+		}
+		return fmt.Errorf("Redis URL Secret env not found")
 	})
 }
 
@@ -1041,6 +1123,22 @@ func TestCRDValidations(t *testing.T) {
 	rt4.Spec.APIKeySecretRef = &ragv1alpha1.SecretKeyRef{Name: "auth", Key: "apiKey"}
 	if err := k8sClient.Create(testCtx, rt4); err == nil {
 		t.Error("expected OIDC Retriever with apiKeySecretRef to fail admission")
+	}
+
+	// 7. Redis-backed rate limiting requires a Secret-backed Redis URL.
+	rt5 := &ragv1alpha1.Retriever{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis-without-url", Namespace: ns},
+		Spec: ragv1alpha1.RetrieverSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: "served"},
+			Replicas:         2,
+			RateLimit: &ragv1alpha1.RateLimitSpec{
+				Enabled: boolPtr(true),
+				Backend: "redis",
+			},
+		},
+	}
+	if err := k8sClient.Create(testCtx, rt5); err == nil {
+		t.Error("expected Redis rate limiter without redisURLSecretRef to fail admission")
 	}
 }
 

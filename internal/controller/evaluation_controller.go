@@ -23,6 +23,7 @@ func (r *KnowledgeBaseReconciler) startEval(
 		return ctrl.Result{}, err
 	}
 	if !specConfigMapSizeOK(specJSON) {
+		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
 			"SpecConfigTooLarge", "worker spec ConfigMap exceeds 1 MiB limit; reduce includeGlobs or web URLs, or split into multiple KnowledgeBases")
 		return ctrl.Result{}, r.statusUpdate(ctx, kb)

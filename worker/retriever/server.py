@@ -10,6 +10,8 @@ Config comes entirely from env (set by the operator):
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import secrets
 import os
 import threading
@@ -26,6 +28,8 @@ from rag_worker.chunking import chunk_text
 
 from rag_worker.embeddings import from_spec
 from rag_worker.stores import make_store
+from retriever.metrics import metrics as _metrics, start_metrics_server
+from retriever.rate_limit import RedisRateLimiter
 
 try:
     from opentelemetry import trace
@@ -44,6 +48,20 @@ class _RequestBodyTooLarge(Exception):
     pass
 
 
+class _QueryMetricTimer:
+    def __enter__(self):
+        self.started = time.perf_counter()
+        self.result = "error"
+        _metrics.query_started()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        _metrics.query_finished(
+            self.result,
+            time.perf_counter() - self.started,
+        )
+
+
 class _RequestBodyLimitMiddleware:
     """Streaming body limit that also covers chunked requests without Content-Length."""
 
@@ -51,7 +69,7 @@ class _RequestBodyLimitMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path") == "/healthz":
+        if scope["type"] != "http" or scope.get("path") in ("/healthz", "/readyz"):
             await self.app(scope, receive, send)
             return
 
@@ -63,6 +81,7 @@ class _RequestBodyLimitMiddleware:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > _MAX_REQUEST_BODY_BYTES:
+                    _metrics.rejected("body_too_large")
                     raise _RequestBodyTooLarge
             return message
 
@@ -78,6 +97,11 @@ class _RequestBodyLimitMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    metrics_server = None
+    if os.environ.get("METRICS_ENABLED", "false").lower() == "true":
+        metrics_server = start_metrics_server(
+            int(os.environ.get("METRICS_PORT", "9090"))
+        )
     yield
     global _store
     if _store is not None:
@@ -85,6 +109,11 @@ async def lifespan(app: FastAPI):
             _store.close()
         except Exception:
             pass
+    if _redis_rate_limiter is not None:
+        _redis_rate_limiter.close()
+    if metrics_server is not None:
+        metrics_server.shutdown()
+        metrics_server.server_close()
 
 app = FastAPI(title="kuberag-retriever", lifespan=lifespan)
 
@@ -103,7 +132,25 @@ _API_KEY = os.environ.get("RETRIEVER_API_KEY", "")
 _RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "false").lower() == "true"
 _RATE_LIMIT_RPM = max(1, int(os.environ.get("RATE_LIMIT_REQUESTS_PER_MINUTE", "60") or 60))
 _RATE_LIMIT_BURST = max(1, int(os.environ.get("RATE_LIMIT_BURST", "20") or 20))
+_RATE_LIMIT_BACKEND = os.environ.get("RATE_LIMIT_BACKEND", "local").lower()
+_RATE_LIMIT_REDIS_KEY_PREFIX = os.environ.get(
+    "RATE_LIMIT_REDIS_KEY_PREFIX",
+    "kuberag:ratelimit",
+)
+_RATE_LIMIT_CLIENT_ID_HEADER = os.environ.get(
+    "RATE_LIMIT_CLIENT_ID_HEADER",
+    "",
+)
+_redis_rate_limiter = None
+if _RATE_LIMIT_ENABLED and _RATE_LIMIT_BACKEND == "redis":
+    _redis_rate_limiter = RedisRateLimiter(
+        os.environ.get("RATE_LIMIT_REDIS_URL", ""),
+        _RATE_LIMIT_REDIS_KEY_PREFIX,
+        _RATE_LIMIT_RPM,
+        _RATE_LIMIT_BURST,
+    )
 _MAX_CONCURRENT_REQUESTS = max(1, int(os.environ.get("MAX_CONCURRENT_REQUESTS", "32") or 32))
+_metrics.set_capacity(_MAX_CONCURRENT_REQUESTS)
 _log_burst = 30
 _log_interval = 10.0
 _log_tokens = _log_burst
@@ -149,6 +196,16 @@ def _request_api_key(request: Request) -> str:
 
 
 def _client_id(request: Request) -> str:
+    if _RATE_LIMIT_CLIENT_ID_HEADER:
+        identity = request.headers.get(_RATE_LIMIT_CLIENT_ID_HEADER, "")
+        if identity:
+            digest = hashlib.sha256(identity.encode()).hexdigest()[:32]
+            return f"header:{digest}"
+    if _AUTH_ENABLED:
+        credential = _request_api_key(request)
+        if credential:
+            digest = hashlib.sha256(credential.encode()).hexdigest()[:32]
+            return f"credential:{digest}"
     # Do not trust X-Forwarded-For here: accepting it without a trusted-proxy
     # configuration lets callers bypass rate limits by forging the header.
     return request.client.host if request.client else "unknown"
@@ -189,18 +246,20 @@ async def production_guards(request: Request, call_next):
     global _active_requests
 
     # Kubernetes probes must remain cheap and usable without credentials.
-    if request.url.path == "/healthz":
+    if request.url.path in ("/healthz", "/readyz"):
         return await call_next(request)
 
     content_length = request.headers.get("content-length")
     if content_length:
         try:
             if int(content_length) > _MAX_REQUEST_BODY_BYTES:
+                _metrics.rejected("body_too_large")
                 return JSONResponse(
                     status_code=413,
                     content={"detail": "request body too large"},
                 )
         except ValueError:
+            _metrics.rejected("invalid_content_length")
             return JSONResponse(
                 status_code=400,
                 content={"detail": "invalid Content-Length header"},
@@ -209,6 +268,7 @@ async def production_guards(request: Request, call_next):
     if _AUTH_ENABLED:
         candidate = _request_api_key(request)
         if not candidate or not secrets.compare_digest(candidate, _API_KEY):
+            _metrics.rejected("authentication")
             return JSONResponse(
                 status_code=401,
                 content={"detail": "invalid or missing API key"},
@@ -216,10 +276,25 @@ async def production_guards(request: Request, call_next):
             )
 
     if _RATE_LIMIT_ENABLED:
-        allowed, retry_after = _consume_rate_token(
-            _client_id(request), time.monotonic()
-        )
+        if _RATE_LIMIT_BACKEND == "redis":
+            try:
+                allowed, retry_after = await asyncio.to_thread(
+                    _redis_rate_limiter.consume,
+                    _client_id(request),
+                )
+            except Exception:
+                _metrics.rejected("rate_limit_backend")
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "rate limit backend unavailable"},
+                    headers={"Retry-After": "1"},
+                )
+        else:
+            allowed, retry_after = _consume_rate_token(
+                _client_id(request), time.monotonic()
+            )
         if not allowed:
+            _metrics.rejected("rate_limit")
             return JSONResponse(
                 status_code=429,
                 content={"detail": "rate limit exceeded"},
@@ -228,6 +303,7 @@ async def production_guards(request: Request, call_next):
 
     with _guard_lock:
         if _active_requests >= _MAX_CONCURRENT_REQUESTS:
+            _metrics.rejected("concurrency")
             return JSONResponse(
                 status_code=503,
                 content={"detail": "too many concurrent requests"},
@@ -421,9 +497,24 @@ def healthz() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/readyz")
+def readyz():
+    try:
+        _ensure()
+        if _RATE_LIMIT_ENABLED and _RATE_LIMIT_BACKEND == "redis":
+            if _redis_rate_limiter is None or not _redis_rate_limiter.ping():
+                raise RuntimeError("rate limit backend unavailable")
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not-ready"},
+        )
+    return {"status": "ready"}
+
+
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest) -> QueryResponse:
-    with _otel_tracer.start_as_current_span("retriever.query") as span:
+    with _QueryMetricTimer() as query_metrics, _otel_tracer.start_as_current_span("retriever.query") as span:
         _ensure()
         t0 = time.perf_counter()
         topk = req.topK or _DEFAULT_TOPK
@@ -511,6 +602,7 @@ def query(req: QueryRequest) -> QueryResponse:
                 )
             except Exception as e:
                 genErr = f"{type(e).__name__}: {e}"
+        query_metrics.result = "generation_error" if genErr else "success"
         return QueryResponse(query=req.query, results=results, answer=answer, generationError=genErr, meta=meta)
 
 

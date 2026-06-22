@@ -1,0 +1,154 @@
+# Prerequisites in tenant-prod:
+# - qdrant-credentials Secret with key apiKey
+# - github-credentials Secret with key token
+# - retriever-oidc Secret with keys clientID, clientSecret, cookieSecret
+# - retriever-redis Secret with key url (rediss:// URL recommended)
+# - nginx IngressClass and letsencrypt-prod cert-manager ClusterIssuer
+# Pin workerImage/image to signed immutable sha-* tags before applying.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-prod
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: kuberag-workloads
+  namespace: tenant-prod
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 32Gi
+    limits.cpu: "16"
+    limits.memory: 64Gi
+    pods: "50"
+    count/jobs.batch: "20"
+    count/configmaps: "100"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: kuberag-defaults
+  namespace: tenant-prod
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      default:
+        cpu: "2"
+        memory: 4Gi
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: KnowledgeBase
+metadata:
+  name: company-docs
+  namespace: tenant-prod
+spec:
+  workerImage: ghcr.io/furkandogmus/kuberag-worker:sha-REPLACE_ME
+  sources:
+    - name: handbook
+      type: github
+      github:
+        repo: company/handbook
+        ref: main
+        includeGlobs:
+          - "docs/**/*.md"
+          - "runbooks/**/*.md"
+        tokenSecretRef:
+          name: github-credentials
+          key: token
+  chunking:
+    strategy: semantic
+    maxTokens: 800
+    overlap: 80
+  embedding:
+    provider: local
+    model: bge-small
+  vectorStore:
+    type: qdrant
+    endpoint: https://qdrant.example.internal:6333
+    collection: company-docs
+    distance: cosine
+    credentialsSecretRef:
+      name: qdrant-credentials
+      key: apiKey
+  freshness:
+    schedule: "0 */6 * * *"
+  ingestion:
+    mode: incremental
+    batchSize: 64
+    ttlSecondsAfterFinished: 86400
+    activeDeadlineSeconds: 7200
+    modelCacheSizeLimit: 4Gi
+    resources:
+      cpu: "2"
+      memory: 8Gi
+---
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Retriever
+metadata:
+  name: company-docs
+  namespace: tenant-prod
+spec:
+  knowledgeBaseRef:
+    name: company-docs
+  image: ghcr.io/furkandogmus/kuberag-retriever:sha-REPLACE_ME
+  replicas: 2
+  topK: 8
+  hybrid: true
+  hybridDensePercent: 70
+  scoreThresholdPercent: 20
+  rateLimit:
+    enabled: true
+    requestsPerMinute: 120
+    burst: 30
+    backend: redis
+    redisURLSecretRef:
+      name: retriever-redis
+      key: url
+    redisKeyPrefix: production:company-docs
+    clientIdentityHeader: X-Forwarded-Email
+  maxConcurrentRequests: 32
+  maxRequestBodyBytes: 1048576
+  podDisruptionBudget: true
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  ingress:
+    host: rag.example.com
+    className: nginx
+    tlsSecretName: rag-example-tls
+    clusterIssuer: letsencrypt-prod
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: 1m
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  oidc:
+    issuerURL: https://id.example.com/realms/company
+    clientIDSecretRef:
+      name: retriever-oidc
+      key: clientID
+    clientSecretSecretRef:
+      name: retriever-oidc
+      key: clientSecret
+    cookieSecretRef:
+      name: retriever-oidc
+      key: cookieSecret
+    emailDomains:
+      - example.com
+    groups:
+      - rag-users
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi

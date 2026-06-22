@@ -370,6 +370,13 @@ func isQuotaExceeded(err error) bool {
 			strings.Contains(err.Error(), "exceeded limitrange"))
 }
 
+func specConfigTooLargeUnchanged(kb *ragv1alpha1.KnowledgeBase) bool {
+	condition := meta.FindStatusCondition(kb.Status.Conditions, ragv1alpha1.ConditionReady)
+	return condition != nil &&
+		condition.Reason == "SpecConfigTooLarge" &&
+		condition.ObservedGeneration == kb.Generation
+}
+
 func (r *KnowledgeBaseReconciler) computeSecretsHash(ctx context.Context, kb *ragv1alpha1.KnowledgeBase) string {
 	hasher := sha256.New()
 

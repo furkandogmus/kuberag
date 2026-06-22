@@ -25,6 +25,7 @@ type RerankSpec struct {
 }
 
 // RateLimitSpec configures a per-client token-bucket limiter for the Retriever.
+// +kubebuilder:validation:XValidation:rule="self.backend != 'redis' || has(self.redisURLSecretRef)",message="redisURLSecretRef is required when backend is redis"
 type RateLimitSpec struct {
 	// Enabled turns rate limiting on. When disabled, RequestsPerMinute and Burst
 	// are ignored.
@@ -43,6 +44,31 @@ type RateLimitSpec struct {
 	// +kubebuilder:validation:Maximum=10000
 	// +optional
 	Burst int `json:"burst,omitempty"`
+	// Backend selects the limiter state store. "local" is per-pod; "redis"
+	// enforces one quota across all Retriever replicas.
+	// +kubebuilder:default=local
+	// +kubebuilder:validation:Enum=local;redis
+	// +optional
+	Backend string `json:"backend,omitempty"`
+	// RedisURLSecretRef references a redis:// or rediss:// URL. Required when
+	// backend is redis. Keep credentials in the Secret value, not the CR.
+	// +optional
+	RedisURLSecretRef *SecretKeyRef `json:"redisURLSecretRef,omitempty"`
+	// RedisKeyPrefix isolates limiter keys when multiple applications share a
+	// Redis deployment.
+	// +kubebuilder:default="kuberag:ratelimit"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	RedisKeyPrefix string `json:"redisKeyPrefix,omitempty"`
+	// ClientIdentityHeader optionally selects a trusted proxy-injected header
+	// (for example X-Forwarded-Email from the managed OIDC proxy) as the limiter
+	// identity. Configure this only when direct access to the Retriever port is
+	// blocked and the proxy overwrites the header.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9-]+$`
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	ClientIdentityHeader string `json:"clientIdentityHeader,omitempty"`
 }
 
 // AutoscalingSpec configures a CPU-based HorizontalPodAutoscaler.
@@ -158,7 +184,7 @@ type RetrieverSpec struct {
 	KnowledgeBaseRef LocalObjectRef `json:"knowledgeBaseRef"`
 	// APIKeySecretRef enables API-key authentication for the retriever. The
 	// referenced Secret value is accepted as either an Authorization Bearer
-	// token or an X-API-Key header. Health probes remain unauthenticated.
+	// token or an X-API-Key header. Health/readiness probes remain unauthenticated.
 	// +optional
 	APIKeySecretRef *SecretKeyRef `json:"apiKeySecretRef,omitempty"`
 	// RateLimit enables per-client request throttling. Omit to disable.

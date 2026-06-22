@@ -72,14 +72,21 @@ jobs:
       - name: helm lint
         run: make lint-helm
 
+      - name: helm chart contract tests
+        run: make test-helm
+
       - name: kustomize render
         run: make lint-kustomize
+
+      - name: observability assets
+        run: make lint-observability
 
       - name: generated artifacts up to date
         run: |
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 object:headerFile=/dev/null paths="./api/..."
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 crd rbac:roleName=kuberag-role paths="./..." \
             output:crd:artifacts:config=config/crd output:rbac:artifacts:config=config/rbac
+          make sync-helm-crds
           git diff --exit-code || (echo "::error::CRD/RBAC/deepcopy out of date — run 'make manifests generate'"; exit 1)
 
       - name: API reference up to date
@@ -128,6 +135,15 @@ jobs:
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
+      redis:
+        image: redis:8.4-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -138,9 +154,10 @@ jobs:
         run: python -m pip install -r requirements.txt -r requirements-test.txt
       - name: worker tests
         working-directory: worker
-        run: python -m unittest tests.test_chunking tests.test_common tests.test_globs tests.test_ingest tests.test_server tests.test_sources tests.test_stores -v
+        run: python -m unittest tests.test_backup_restore tests.test_chunking tests.test_common tests.test_globs tests.test_ingest tests.test_load_test tests.test_metrics tests.test_observability_assets tests.test_rate_limit tests.test_rate_limit_integration tests.test_security_assets tests.test_server tests.test_sources tests.test_stores -v
         env:
           PYTHONWARNINGS: ignore::DeprecationWarning
+          REDIS_RATE_LIMIT_URL: redis://localhost:6379/0
       - name: Wait for Qdrant
         run: |
           for i in $(seq 1 20); do

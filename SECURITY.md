@@ -30,6 +30,20 @@ cosign verify \
 
 Substitute `<tag>` with the desired version tag or `latest`.
 
+For clusters running Kyverno v1.18 or newer, the repository includes an
+enforcing `ImageValidatingPolicy` which accepts only kuberag images signed by
+this repository's `release.yaml` GitHub Actions identity, verifies the Sigstore
+transparency log, and resolves tags to immutable digests:
+
+```bash
+kubectl apply -f config/security/kyverno-verify-images.yaml
+```
+
+Kyverno must be installed and healthy before applying the policy. Review the
+trusted repository/workflow identity in the manifest if you publish a fork
+under a different organization. The policy is deliberately not installed by
+the main Helm chart because Kyverno's CRDs are an external cluster dependency.
+
 ## Supported versions
 
 | Version | Supported | Notes |
@@ -51,8 +65,7 @@ Use one of the following:
 
 - **GitHub private vulnerability reporting**:
   <https://github.com/furkandogmus/kuberag/security/advisories/new>
-- **Email**: `security@furkandogmus.dev` (PGP key fingerprint:
-  `TODO: paste fingerprint once key is published`)
+- **Email**: `security@furkandogmus.dev`
 
 Include in the report:
 
@@ -106,15 +119,14 @@ These are intentional, not vulnerabilities to report:
   under `pymilvus` upgrade in the Production Readiness section of
   `ROADMAP.md`. Each release re-runs `pip-audit`; CVEs are listed
   in the release notes.
-- **Worker ServiceAccount sharing.** By default, all KBs in a
-  namespace share a single `kuberag-worker` ServiceAccount. Per-KB
-  SA isolation is in `ROADMAP.md` as "API maturity" work.
-- **No retriever authentication.** The FastAPI server has no
-  built-in auth. Users are expected to front it with an auth proxy
-  (oauth2-proxy, ambassador, etc.) or restrict via NetworkPolicy.
-  Tracked in `ROADMAP.md`.
-- **No retriever TLS.** The Service is HTTP. cert-manager / Ingress
-  with TLS is the deployment pattern. Tracked in `ROADMAP.md`.
+- **Rate-limit identity.** Local and Redis-backed token buckets identify clients
+  from the effective remote address. Configure trusted proxy handling at the
+  ingress/gateway; do not trust arbitrary forwarded headers from public clients.
+- **Application-level authorization.** API-key authentication and managed OIDC
+  ingress are available, but per-document/per-route policy enforcement is not.
+- **Internal Retriever HTTP.** Managed Ingress can terminate TLS, while the
+  Service-to-pod hop remains HTTP and must be protected by NetworkPolicy or a
+  service mesh where in-cluster encryption is required.
 
 ## CVE history
 

@@ -6,9 +6,17 @@ CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
 .PHONY: all
 all: build
 
-.PHONY: generate
+.PHONY: generate sync-helm-crds
 generate: ## Generate DeepCopy methods.
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths="./api/..."
+
+sync-helm-crds: ## Copy generated CRDs into the Helm chart.
+	cp config/crd/rag.furkan.dev_knowledgebases.yaml deploy/helm/kuberag/crds/
+	cp config/crd/rag.furkan.dev_retrievers.yaml deploy/helm/kuberag/crds/
+	cp config/crd/rag.furkan.dev_vectorindices.yaml deploy/helm/kuberag/crds/
+	cp config/crd/rag.furkan.dev_ingestionruns.yaml deploy/helm/kuberag/crds/
+	cp config/crd/rag.furkan.dev_backups.yaml deploy/helm/kuberag/crds/
+	cp config/crd/rag.furkan.dev_restores.yaml deploy/helm/kuberag/crds/
 
 .PHONY: manifests
 manifests: ## Generate CRD + RBAC manifests.
@@ -51,7 +59,7 @@ test-py: ## Run Python worker tests.
 api-docs: manifests ## Regenerate docs/API.md from the rendered CRD YAML.
 	$(PYTHON) hack/gen-api-docs.py
 
-.PHONY: lint-helm lint-kustomize
+.PHONY: lint-helm test-helm lint-kustomize lint-observability
 lint-helm: ## Lint the Helm chart.
 	@which helm >/dev/null || (echo "helm not found; install from https://helm.sh"; exit 1)
 	helm lint deploy/helm/kuberag/
@@ -59,9 +67,18 @@ lint-helm: ## Lint the Helm chart.
 		--namespace kuberag-system \
 		--set rbac.scope=namespace \
 		--set rbac.watchNamespace=tenant-a >/dev/null
+	helm template kuberag-production deploy/helm/kuberag \
+		--namespace kuberag-system \
+		-f config/samples/production-values.yaml >/dev/null
+
+test-helm: ## Verify rendered Helm resources and production option contracts.
+	go test -tags=helm -count=1 ./internal/helmtest
 
 lint-kustomize: ## Render the Kustomize base to catch broken resource references.
 	go run sigs.k8s.io/kustomize/kustomize/v5@v5.7.1 build config >/dev/null
+
+lint-observability: ## Validate Grafana dashboard JSON.
+	$(PYTHON) -m json.tool config/observability/grafana-dashboard.json >/dev/null
 
 NAMESPACE ?= default
 RETRIEVER ?= kuberag-retriever
@@ -83,6 +100,13 @@ govulncheck: ## Scan Go dependencies for known vulnerabilities.
 .PHONY: demo
 demo: ## Create a k3d cluster and run a full end-to-end demo.
 	./hack/demo.sh
+
+.PHONY: load-test
+load-test: ## Load-test a Retriever (set URL, REQUESTS and CONCURRENCY).
+	$(PYTHON) hack/load-test.py \
+		--url "$${URL:?set URL to the Retriever /query endpoint}" \
+		--requests "$${REQUESTS:-100}" \
+		--concurrency "$${CONCURRENCY:-10}"
 
 .PHONY: run
 run: generate ## Run the operator against the current kubeconfig.

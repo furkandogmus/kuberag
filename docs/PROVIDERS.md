@@ -154,14 +154,37 @@ automatically rolls out the Retriever Deployment.
 
 ### Runtime protection
 
-`Retriever.spec.rateLimit` enables a bounded, per-pod token bucket keyed by the
-direct client IP. `maxConcurrentRequests` rejects excess in-flight work with
-503, and `maxRequestBodyBytes` rejects oversized bodies with 413, including
-chunked requests. Health probes bypass these guards.
+`Retriever.spec.rateLimit` enables a bounded token bucket keyed by the direct
+client IP. The default `local` backend is per-pod. For strict quotas across
+replicas, configure the built-in Redis backend:
 
-For strict quotas across multiple replicas, put a distributed gateway or
-Redis-backed rate limiter in front of the Service; the built-in limiter is
-deliberately local to each pod and does not trust `X-Forwarded-For`.
+```yaml
+rateLimit:
+  enabled: true
+  requestsPerMinute: 120
+  burst: 30
+  backend: redis
+  redisURLSecretRef:
+    name: retriever-redis
+    key: url
+  redisKeyPrefix: production:company-docs
+  clientIdentityHeader: X-Forwarded-Email
+```
+
+The Secret value must be a `redis://` or `rediss://` URL. Redis operations use
+an atomic server-time Lua token bucket, client identifiers are hashed before
+becoming keys, and an unavailable backend fails closed with HTTP 503.
+`maxConcurrentRequests` rejects excess in-flight work with 503, while
+`maxRequestBodyBytes` rejects oversized bodies with 413. Health probes bypass
+all guards. `clientIdentityHeader` is appropriate only for a trusted proxy
+which overwrites that header and when NetworkPolicy blocks direct access to the
+Retriever port. Without it, authenticated API-key traffic is keyed by a hash of
+the credential and other traffic uses the direct remote address. Arbitrary
+`X-Forwarded-For` values are never trusted.
+
+`/healthz` remains a process-only liveness endpoint. `/readyz` verifies lazy
+Retriever initialization and Redis connectivity, so a failed distributed
+limiter removes the pod from Service endpoints without causing a restart loop.
 
 ### Ingress, TLS, and OIDC
 

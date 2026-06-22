@@ -105,6 +105,7 @@ Required top-level: `embedding, sources, vectorStore`
 - **`bestChunking.strategy`** `string` (optional) — ChunkingStrategy enumerates how documents get split. · enum: `semantic, recursive, fixed`
 - **`bestRecallPercent`** `integer` (optional) — BestRecallPercent is the highest recall observed across auto-tune attempts.
 - **`conditions`** `array(object)` (optional)
+- **`deferCronIngest`** `boolean` (optional) — DeferCronIngest is set when a freshness cron fires while an ActiveJob is already running. When the current Job completes the operator starts a deferred ingestion instead of silently dropping the cron tick.
 - **`effectiveChunking`** `object` (optional) — EffectiveChunking is the chunking actually in use (spec, possibly auto-tuned).
 - **`effectiveChunking.maxTokens`** `integer` (optional) · `minimum=1`
 - **`effectiveChunking.overlap`** `integer` (optional) · `minimum=0`
@@ -117,6 +118,7 @@ Required top-level: `embedding, sources, vectorStore`
 - **`evaluation.time`** `string` (optional) · `format=date-time`
 - **`indexedChunks`** `integer` (optional) — IndexedChunks is the total number of chunks in the store after the last run.
 - **`ingestRound`** `integer` (optional) — IngestRound increments for every ingestion attempt so retries never collide with a still-present finished Job.
+- **`lastCheckpoint`** `array(object)` (optional) — LastCheckpoint records the per-source progress from the last failed ingestion's checkpoint, enabling the next attempt to resume rather than restart from scratch.
 - **`lastFailedSpecHash`** `string` (optional) — LastFailedSpecHash fingerprints the corpus spec used by the most recent failed ingestion.
 - **`lastFailureTime`** `string` (optional) — LastFailureTime is when the most recent ingestion failed. · `format=date-time`
 - **`lastIndexedTime`** `string` (optional) · `format=date-time`
@@ -217,8 +219,14 @@ Required top-level: `knowledgeBaseRef`
 - **`oidc.issuerURL`** `string` (optional) — IssuerURL is the OpenID Connect issuer discovery URL. · `pattern=^https://`
 - **`podDisruptionBudget`** `boolean` (optional) — PodDisruptionBudget controls whether the operator maintains a PDB for this Retriever. Enabled by default when replicas is greater than one.
 - **`rateLimit`** `object` (optional) — RateLimit enables per-client request throttling. Omit to disable.
+- **`rateLimit.backend`** `string` (optional) — Backend selects the limiter state store. "local" is per-pod; "redis" enforces one quota across all Retriever replicas. · enum: `local, redis`
 - **`rateLimit.burst`** `integer` (optional) — Burst is the maximum number of immediately available request tokens. · `minimum=1`, `maximum=10000`
+- **`rateLimit.clientIdentityHeader`** `string` (optional) — ClientIdentityHeader optionally selects a trusted proxy-injected header (for example X-Forwarded-Email from the managed OIDC proxy) as the limiter identity. Configure this only when direct access to the Retriever port is blocked and the proxy overwrites the header. · `maxLength=128`, `pattern=^[A-Za-z0-9-]+$`
 - **`rateLimit.enabled`** `boolean` (optional) — Enabled turns rate limiting on. When disabled, RequestsPerMinute and Burst are ignored.
+- **`rateLimit.redisKeyPrefix`** `string` (optional) — RedisKeyPrefix isolates limiter keys when multiple applications share a Redis deployment. · `minLength=1`, `maxLength=128`
+- **`rateLimit.redisURLSecretRef`** `object` (optional) — RedisURLSecretRef references a redis:// or rediss:// URL. Required when backend is redis. Keep credentials in the Secret value, not the CR.
+- **`rateLimit.redisURLSecretRef.key`** `string` (optional)
+- **`rateLimit.redisURLSecretRef.name`** `string` (optional)
 - **`rateLimit.requestsPerMinute`** `integer` (optional) — RequestsPerMinute is the sustained request rate allowed per client IP. · `minimum=1`, `maximum=100000`
 - **`replicas`** `integer` (optional) — Replicas of the retriever server. · `minimum=0`, `format=int32`
 - **`rerank`** `object` (optional) — RerankSpec configures optional cross-encoder reranking of retrieved chunks.

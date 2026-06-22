@@ -1,0 +1,56 @@
+# Requires Kyverno v1.18+.
+# This policy is intentionally not part of the default Kustomize/Helm install:
+# install Kyverno first, review the trusted workflow identity, then apply it.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-kuberag-images
+  annotations:
+    policies.kyverno.io/title: Verify kuberag images
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+spec:
+  validationActions:
+    - Deny
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 15
+  evaluation:
+    background:
+      enabled: false
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - pods
+  matchImageReferences:
+    - glob: "ghcr.io/furkandogmus/kuberag*"
+  validationConfigurations:
+    mutateDigest: true
+    required: true
+    verifyDigest: true
+  attestors:
+    - name: kuberagRelease
+      cosign:
+        keyless:
+          identities:
+            - subjectRegExp: '^https://github\.com/furkandogmus/kuberag/\.github/workflows/release\.yaml@refs/(heads/main|tags/v.*)$'
+              issuer: "https://token.actions.githubusercontent.com"
+        ctlog:
+          url: "https://rekor.sigstore.dev"
+          insecureIgnoreTlog: false
+          insecureIgnoreSCT: false
+  validations:
+    - expression: >-
+        imageverify.verify(images.containers,
+        attestors.kuberagRelease).all(result, result.verified)
+      message: >-
+        kuberag images must be signed by the repository release workflow and
+        recorded in the Sigstore transparency log

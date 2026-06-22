@@ -1574,6 +1574,12 @@ spec:
                   - type
                   type: object
                 type: array
+              deferCronIngest:
+                description: |-
+                  DeferCronIngest is set when a freshness cron fires while an ActiveJob is
+                  already running. When the current Job completes the operator starts a
+                  deferred ingestion instead of silently dropping the cron tick.
+                type: boolean
               effectiveChunking:
                 description: EffectiveChunking is the chunking actually in use (spec,
                   possibly auto-tuned).
@@ -1626,6 +1632,28 @@ spec:
                   IngestRound increments for every ingestion attempt so retries never
                   collide with a still-present finished Job.
                 type: integer
+              lastCheckpoint:
+                description: |-
+                  LastCheckpoint records the per-source progress from the last failed
+                  ingestion's checkpoint, enabling the next attempt to resume rather
+                  than restart from scratch.
+                items:
+                  description: |-
+                    IngestSourceResult records per-source sync output for incremental tracking.
+                    Used both by the worker result JSON and as the checkpoint/resume state.
+                  properties:
+                    chunks:
+                      type: integer
+                    name:
+                      type: string
+                    revision:
+                      type: string
+                  required:
+                  - chunks
+                  - name
+                  - revision
+                  type: object
+                type: array
               lastFailedSpecHash:
                 description: |-
                   LastFailedSpecHash fingerprints the corpus spec used by the most recent

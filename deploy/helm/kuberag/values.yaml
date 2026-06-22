@@ -35,6 +35,14 @@ metrics:
   serviceMonitor:
     enabled: false
     interval: 30s
+  retrieverServiceMonitor:
+    enabled: false
+    interval: 30s
+  prometheusRule:
+    enabled: false
+    # Alert when no successful ingestion has occurred in a namespace for this
+    # many seconds. Tune to your slowest expected freshness schedule.
+    ingestionFreshnessSeconds: 86400
 
 # Leader election configuration.
 leaderElection:

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +21,51 @@ import (
 )
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestLongResourceNamesKeepStableUniqueSuffixes(t *testing.T) {
+	first := strings.Repeat("a", 70) + "-one"
+	second := strings.Repeat("a", 70) + "-two"
+
+	firstJob := truncName(first)
+	secondJob := truncName(second)
+	if len(firstJob) > 63 || len(secondJob) > 63 {
+		t.Fatalf("truncated names exceed DNS label limit: %d, %d", len(firstJob), len(secondJob))
+	}
+	if firstJob == secondJob {
+		t.Fatal("distinct long names collided after truncation")
+	}
+	if truncName(first) != firstJob {
+		t.Fatal("truncation must be deterministic")
+	}
+
+	resultName := nameWithSuffix(firstJob, "-result")
+	checkpointName := nameWithSuffix(firstJob, "-checkpoint")
+	if len(resultName) > 63 || len(checkpointName) > 63 {
+		t.Fatalf("derived names exceed DNS label limit: %d, %d", len(resultName), len(checkpointName))
+	}
+	if !strings.HasSuffix(resultName, "-result") || !strings.HasSuffix(checkpointName, "-checkpoint") {
+		t.Fatalf("derived names lost semantic suffixes: %q %q", resultName, checkpointName)
+	}
+}
+
+func TestSuccessfulIngestionTimestampIsMonotonicPerNamespace(t *testing.T) {
+	namespace := "metrics-monotonic"
+	freshnessMu.Lock()
+	delete(lastSuccessfulIngestionByNamespace, namespace)
+	freshnessMu.Unlock()
+	lastSuccessfulIngestionTimestamp.DeleteLabelValues(namespace)
+
+	observeSuccessfulIngestion(namespace, time.Unix(2_000, 0))
+	observeSuccessfulIngestion(namespace, time.Unix(1_000, 0))
+
+	metric := &dto.Metric{}
+	if err := lastSuccessfulIngestionTimestamp.WithLabelValues(namespace).Write(metric); err != nil {
+		t.Fatalf("write freshness metric: %v", err)
+	}
+	if metric.Gauge == nil || metric.Gauge.Value == nil || *metric.Gauge.Value != 2_000 {
+		t.Fatalf("freshness metric regressed: %+v", metric.Gauge)
+	}
+}
 
 func baseKB() *ragv1alpha1.KnowledgeBase {
 	return &ragv1alpha1.KnowledgeBase{
@@ -657,6 +703,11 @@ func TestSecurityContextHardening(t *testing.T) {
 	if len(depContainer.VolumeMounts) != 1 || depContainer.VolumeMounts[0].Name != "scratch" || depContainer.VolumeMounts[0].MountPath != "/scratch" {
 		t.Error("expected Deployment container to have 'scratch' volume mount at /scratch")
 	}
+	if depContainer.ReadinessProbe == nil ||
+		depContainer.ReadinessProbe.HTTPGet == nil ||
+		depContainer.ReadinessProbe.HTTPGet.Path != "/readyz" {
+		t.Error("expected Retriever readiness probe to use dependency-aware /readyz")
+	}
 
 	var depHasHome bool
 	for _, env := range depContainer.Env {
@@ -793,6 +844,69 @@ func TestDeploymentSchedulingAndChecksums(t *testing.T) {
 	hash2 := r.computeSecretsHash(context.Background(), rt, kb)
 	if hash1 == hash2 {
 		t.Error("expected secret checksum hash to change when secret data is updated")
+	}
+}
+
+func TestRedisRateLimitSecretAndDeploymentWiring(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ragv1alpha1.AddToScheme(scheme)
+	redisSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "redis-rate-limit", Namespace: "default"},
+		Data:       map[string][]byte{"url": []byte("rediss://redis.example:6379/0")},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(redisSecret).Build()
+	reconciler := &RetrieverReconciler{Client: fakeClient, Scheme: scheme}
+	kb := baseKB()
+	rt := &ragv1alpha1.Retriever{
+		ObjectMeta: metav1.ObjectMeta{Name: "distributed", Namespace: "default"},
+		Spec: ragv1alpha1.RetrieverSpec{
+			KnowledgeBaseRef: ragv1alpha1.LocalObjectRef{Name: kb.Name},
+			Replicas:         3,
+			RateLimit: &ragv1alpha1.RateLimitSpec{
+				Enabled:              boolPtr(true),
+				RequestsPerMinute:    600,
+				Burst:                50,
+				Backend:              "redis",
+				RedisURLSecretRef:    &ragv1alpha1.SecretKeyRef{Name: redisSecret.Name, Key: "url"},
+				RedisKeyPrefix:       "prod:docs",
+				ClientIdentityHeader: "X-Forwarded-Email",
+			},
+		},
+	}
+
+	if reason, message := reconciler.validateRetrieverSecrets(context.Background(), rt, kb); reason != "" {
+		t.Fatalf("valid Redis Secret rejected: %s: %s", reason, message)
+	}
+	deployment := reconciler.desiredDeployment(rt, kb, "hash")
+	env := map[string]corev1.EnvVar{}
+	for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+		env[item.Name] = item
+	}
+	if env["RATE_LIMIT_BACKEND"].Value != "redis" ||
+		env["RATE_LIMIT_REDIS_KEY_PREFIX"].Value != "prod:docs" ||
+		env["RATE_LIMIT_CLIENT_ID_HEADER"].Value != "X-Forwarded-Email" {
+		t.Fatalf("unexpected distributed limiter env: %#v", env)
+	}
+	redisURL := env["RATE_LIMIT_REDIS_URL"]
+	if redisURL.ValueFrom == nil || redisURL.ValueFrom.SecretKeyRef == nil ||
+		redisURL.ValueFrom.SecretKeyRef.Name != redisSecret.Name ||
+		redisURL.ValueFrom.SecretKeyRef.Key != "url" {
+		t.Fatalf("Redis URL is not Secret-backed: %#v", redisURL)
+	}
+
+	hashBefore := reconciler.computeSecretsHash(context.Background(), rt, kb)
+	var updated corev1.Secret
+	if err := fakeClient.Get(context.Background(), client.ObjectKeyFromObject(redisSecret), &updated); err != nil {
+		t.Fatalf("get Redis Secret: %v", err)
+	}
+	updated.Data["url"] = []byte("rediss://redis-new.example:6379/0")
+	if err := fakeClient.Update(context.Background(), &updated); err != nil {
+		t.Fatalf("update Redis Secret: %v", err)
+	}
+	hashAfter := reconciler.computeSecretsHash(context.Background(), rt, kb)
+	if hashBefore == hashAfter {
+		t.Fatal("Redis URL Secret rotation must change the rollout hash")
 	}
 }
 

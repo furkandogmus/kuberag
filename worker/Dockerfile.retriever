@@ -15,6 +15,6 @@ RUN pip install --no-cache-dir -r requirements-retriever.txt \
 COPY --chown=65532:65532 rag_worker/ ./rag_worker/
 COPY --chown=65532:65532 retriever/ ./retriever/
 
-EXPOSE 8000
+EXPOSE 8000 9090
 USER 65532:65532
 ENTRYPOINT ["uvicorn", "retriever.server:app", "--host", "0.0.0.0", "--port", "8000"]

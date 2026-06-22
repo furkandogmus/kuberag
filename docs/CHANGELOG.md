@@ -9,10 +9,39 @@ breaking changes between minors.
 ## [Unreleased]
 
 ### Added
+- **Retriever Prometheus/SLO package**: dedicated `:9090` metrics Service,
+  bounded request/error/latency/saturation metrics, cross-namespace
+  ServiceMonitor, PrometheusRule alerts, Grafana p50/p95/p99 panels, and a
+  dependency-free concurrent load-test harness.
+- **Restricted Pod Security regression coverage** for generated worker Jobs,
+  Retriever/OIDC pods, Helm defaults, and the static operator manifest.
+- **Helm chart contract tests** for RBAC scope, image overrides, security
+  contexts, disruption/network policies, and observability resources.
+- **Kyverno image verification policy** for enforcing the release workflow's
+  keyless cosign identity, Rekor inclusion, and digest-pinned workloads.
+- **Prometheus cardinality budget and regression guards** preventing
+  user-controlled labels and collapsing unexpected Retriever values.
+- **Worker log-volume regression coverage** for the bounded burst limiter.
+- **Ingestion freshness SLO** with a monotonic namespace timestamp metric,
+  Grafana panel, and configurable stale-ingestion alert.
+- **Production deployment reference** with hardened Helm values, namespace PSS,
+  quota/limits, external store credentials, OIDC/TLS, autoscaling, and pinned
+  image placeholders.
+- **Distributed Retriever rate limiting** through an optional Secret-backed
+  Redis token bucket shared across replicas, with hashed client keys and
+  fail-closed outage behavior.
+- **Helm CRD drift gate** synchronizes generated CRDs into the chart and fails
+  CI when API and packaged schemas diverge.
+- **Real Redis limiter integration test** verifies that separate Retriever
+  instances consume one shared atomic bucket and never expose raw client IDs.
+- **Redis URL Secret watch** now immediately creates/rolls Retriever workloads
+  when the distributed limiter credential appears or rotates.
+- **Dependency-aware Retriever readiness** uses `/readyz` to check Redis while
+  retaining process-only `/healthz` liveness.
 - **Retriever API-key authentication** through
   `Retriever.spec.apiKeySecretRef`. Protected retrievers accept either
-  `Authorization: Bearer` or `X-API-Key`; `/healthz` remains open for
-  Kubernetes probes, and Secret rotation triggers an automatic rollout.
+  `Authorization: Bearer` or `X-API-Key`; `/healthz` and `/readyz` remain open
+  for Kubernetes probes, and Secret rotation triggers an automatic rollout.
 - **Retriever production guards**: optional per-client token-bucket rate
   limiting, bounded rate-limit state, per-pod concurrency caps, streaming
   request-body limits, and standard 429/503 `Retry-After` responses.
@@ -74,6 +103,13 @@ breaking changes between minors.
   CI; `docs/API.md` is now auto-generated.
 
 ### Changed
+- **Atomic restore workflow**: Restore Jobs now load and verify a versioned
+  staging collection before promotion, preserving active data on corruption or
+  partial upload.
+- **Minimal worker specs**: evaluation and restore Jobs now receive only
+  embedding/vector-store configuration, while backup and cleanup Jobs receive
+  only vector-store configuration. Large source lists no longer consume their
+  ConfigMap budget.
 - **Controller binary image** (`kuberag`): still distroless, still
   runs as `USER 65532`. No new security risks.
 - **`pip-audit` invocation** in CI now uses the correct severity
@@ -90,6 +126,20 @@ breaking changes between minors.
   - `pillow` pinned to `>=12.1.1` (transitively pulled)
 
 ### Fixed
+- **Stale Grafana artifact removed**: the obsolete documentation dashboard used
+  invalid recall/freshness PromQL and claimed Retriever metrics were missing.
+  `config/observability/grafana-dashboard.json` is now the sole source.
+- **Long-name and backup collision safety**: generated Kubernetes names retain
+  deterministic hash suffixes, while backup and restore staging IDs use
+  nanosecond precision instead of colliding within the same second.
+- **Milvus backup completeness**: exports now request vector and chunk-hash
+  fields explicitly, and Milvus ingestion preserves `chunk_hash` during upsert.
+- **Oversized ingestion specs** now enter `Failed` with
+  `SpecConfigTooLarge` and stop retrying until the KnowledgeBase generation
+  changes, preventing a status-driven reconciliation hot loop.
+- **Quota handling regression coverage** verifies that ConfigMap quota and
+  LimitRange failures set `ResourceQuotaExceeded` and use a bounded retry,
+  while ordinary RBAC denials remain controller errors.
 - **Secrets hash label length** — `computeSecretsHash` previously
   returned 64 hex characters, exceeding the 63-character Kubernetes
   label-value limit and breaking Job creation with `metadata.labels:

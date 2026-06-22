@@ -120,6 +120,7 @@ func (r *KnowledgeBaseReconciler) finalizeIngest(
 	kb.Status.ObservedGeneration = kb.Generation
 
 	indexedChunks.WithLabelValues(kb.Namespace).Set(float64(result.TotalChunks))
+	observeSuccessfulIngestion(kb.Namespace, now.Time)
 	ingestionsTotal.WithLabelValues(kb.Namespace, "succeeded").Inc()
 	setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionTrue, "IngestionComplete",
 		fmt.Sprintf("indexed %d chunks", result.TotalChunks))
@@ -201,6 +202,7 @@ func (r *KnowledgeBaseReconciler) startIngest(
 		return ctrl.Result{}, err
 	}
 	if !specConfigMapSizeOK(specJSON) {
+		kb.Status.Phase = ragv1alpha1.PhaseFailed
 		setCondition(kb, ragv1alpha1.ConditionReady, metav1.ConditionFalse,
 			"SpecConfigTooLarge", "worker spec ConfigMap exceeds 1 MiB limit; reduce includeGlobs or web URLs, or split into multiple KnowledgeBases")
 		return ctrl.Result{}, r.statusUpdate(ctx, kb)

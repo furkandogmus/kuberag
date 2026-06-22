@@ -15,3 +15,23 @@ spec:
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       path: /metrics
 {{- end }}
+{{- if .Values.metrics.retrieverServiceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kuberag.fullname" . }}-retrievers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kuberag.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: retriever-metrics
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.metrics.retrieverServiceMonitor.interval }}
+      path: /metrics
+{{- end }}

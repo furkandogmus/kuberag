@@ -113,15 +113,69 @@ new credentials. **No re-embedding happens.**
 
 ### Roll back a generation
 
-There's no way to "undo" an ingest. The vector store has the new
-data. Options:
+Create an S3-compatible credentials Secret and a `Backup` before a risky
+re-index or model/chunking migration:
 
-1. **Restore from backup** (your vector store's tooling —
-   Qdrant snapshots, pgvector `pg_dump`, etc.).
-2. **Delete and recreate** the KB. This triggers a `cleanup` Job
+```bash
+kubectl create secret generic backup-s3 \
+  --from-literal=accessKey='<access-key>' \
+  --from-literal=secretKey='<secret-key>'
+
+kubectl apply -f - <<'YAML'
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Backup
+metadata:
+  name: docs-before-migration
+spec:
+  knowledgeBaseRef:
+    name: docs
+  destination:
+    s3:
+      endpoint: https://s3.amazonaws.com
+      region: us-east-1
+      bucket: my-kuberag-backups
+      prefix: production
+      accessKeySecretRef:
+        name: backup-s3
+        key: accessKey
+      secretKeySecretRef:
+        name: backup-s3
+        key: secretKey
+YAML
+
+kubectl wait --for=jsonpath='{.status.phase}'=Completed \
+  backup/docs-before-migration --timeout=1h
+kubectl get backup docs-before-migration
+```
+
+Restore it when needed:
+
+```bash
+kubectl apply -f - <<'YAML'
+apiVersion: rag.furkan.dev/v1alpha1
+kind: Restore
+metadata:
+  name: docs-rollback
+spec:
+  backupRef:
+    name: docs-before-migration
+  knowledgeBaseRef:
+    name: docs
+YAML
+
+kubectl wait --for=jsonpath='{.status.phase}'=Completed \
+  restore/docs-rollback --timeout=1h
+kubectl get restore docs-rollback
+```
+
+Restore downloads the archive into a staging collection, verifies the point
+count, and promotes it atomically; a failed restore preserves the active
+collection. Other options:
+
+1. **Delete and recreate** the KB. This triggers a `cleanup` Job
    that drops the remote collection, then a fresh ingest from
    scratch on the next reconcile.
-3. **Re-ingest from a known revision** (e.g. an old git commit on
+2. **Re-ingest from a known revision** (e.g. an old git commit on
    the source). Set `spec.sources[].ref` and force re-trigger
    via the hash patch above.
 
@@ -282,6 +336,27 @@ kubectl delete job <active-job-name>
 2. For transient errors (network blips to the vector store),
    the controller will retry. Watch for the error rate to
    flatten.
+
+## Retriever SLO alerts
+
+- `KuberagRetrieverHighErrorRate`: inspect `result` in
+  `kuberag_retriever_queries_total`, then Retriever and provider logs. A
+  `generation_error` spike usually points to the LLM provider; `error` points
+  to embedding/vector-store execution.
+- `KuberagRetrieverHighP99Latency`: compare p99 with CPU/memory saturation and
+  vector-store latency. Scale the Retriever only when the bottleneck is local;
+  otherwise scaling amplifies pressure on the store/provider.
+- `KuberagRetrieverSaturated`: raise `maxConcurrentRequests` only after checking
+  memory and downstream capacity, or enable/increase HPA bounds.
+- `KuberagRetrieverRejectingTraffic`: inspect the `reason` label. `rate_limit`
+  is client pressure; `rate_limit_backend` means Redis is unavailable and
+  requests are failing closed; `concurrency` is pod saturation.
+
+Run a controlled reproduction:
+
+```bash
+URL=http://localhost:8000/query REQUESTS=500 CONCURRENCY=25 make load-test
+```
 
 ## Useful queries
 

@@ -47,25 +47,72 @@ def run() -> None:
 
         log(f"downloaded {len(points)} points from {location}")
 
-        store = make_store(spec)
         vs = spec["vectorStore"]
         dim = spec.get("embedding", {}).get("dimension", 768)
         distance = vs.get("distance", "cosine")
-
-        store.recreate_collection(dim, distance)
-
-        batch_size = 64
-        total = len(points)
-        for i in range(0, total, batch_size):
-            batch = points[i:i + batch_size]
-            store.upsert(batch)
-            log(f"restored {min(i + batch_size, total)}/{total} points")
+        restore_round = int(os.environ.get("RESTORE_ROUND", "1"))
+        total = _restore_points(
+            spec,
+            points,
+            dim=dim,
+            distance=distance,
+            restore_round=restore_round,
+        )
 
         log(f"restore complete: {total} points")
         write_result({"restoredPoints": total})
-        store.close()
     finally:
         try:
             os.unlink(tmp.name)
         except OSError:
             pass
+
+
+def _restore_points(
+    spec: dict,
+    points: list[dict],
+    *,
+    dim: int,
+    distance: str,
+    restore_round: int,
+) -> int:
+    """Restore into a staging collection and atomically promote on success."""
+    store = make_store(spec)
+    shadow_name = store.staging_name(restore_round)
+    shadow_spec = {
+        **spec,
+        "vectorStore": {
+            **spec["vectorStore"],
+            "collection": shadow_name,
+        },
+    }
+    shadow_store = make_store(shadow_spec)
+    total = len(points)
+    try:
+        shadow_store.recreate_collection(dim, distance)
+        batch_size = 64
+        for i in range(0, total, batch_size):
+            batch = points[i:i + batch_size]
+            shadow_store.upsert(batch)
+            log(f"restored {min(i + batch_size, total)}/{total} points")
+
+        restored = shadow_store.count()
+        if restored != total:
+            raise RuntimeError(
+                f"restore verification failed: expected {total} points, got {restored}"
+            )
+        if not store.swap_collection(shadow_name):
+            raise RuntimeError(
+                "vector store does not support atomic restore promotion"
+            )
+        return total
+    except Exception:
+        log("ERROR: restore failed; dropping staging collection, active data preserved")
+        try:
+            shadow_store.drop()
+        except Exception:
+            pass
+        raise
+    finally:
+        shadow_store.close()
+        store.close()

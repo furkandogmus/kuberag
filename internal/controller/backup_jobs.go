@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -36,7 +37,7 @@ type RestoreResult struct {
 
 // buildBackupJob renders a Job that exports vector store data to S3.
 func buildBackupJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, bkp *ragv1alpha1.Backup, backupID string) (*batchv1.Job, string, error) {
-	specJSON, err := marshalEffectiveSpec(kb, effectiveChunking(kb))
+	specJSON, err := marshalStoreSpec(kb)
 	if err != nil {
 		return nil, "", err
 	}
@@ -123,15 +124,18 @@ func buildBackupJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, bkp *rag
 
 // buildRestoreJob renders a Job that imports vector store data from S3.
 func buildRestoreJob(ctx context.Context, kb *ragv1alpha1.KnowledgeBase, rest *ragv1alpha1.Restore, backup *ragv1alpha1.Backup) (*batchv1.Job, string, error) {
-	specJSON, err := marshalEffectiveSpec(kb, effectiveChunking(kb))
+	specJSON, err := marshalQuerySpec(kb)
 	if err != nil {
 		return nil, "", err
 	}
 
 	dst := backup.Spec.Destination.S3
-	name := truncName(fmt.Sprintf("%s-restore-%d", rest.Name, time.Now().Unix()))
+	now := time.Now()
+	restoreRound := now.UnixNano()
+	name := truncName(fmt.Sprintf("%s-restore-%d", rest.Name, now.Unix()))
 
 	env := []corev1.EnvVar{
+		{Name: "RESTORE_ROUND", Value: strconv.FormatInt(restoreRound, 10)},
 		{Name: "RESTORE_LOCATION", Value: backup.Status.Location},
 		{Name: "RESTORE_S3_ENDPOINT", Value: dst.Endpoint},
 		{Name: "RESTORE_S3_REGION", Value: dst.Region},

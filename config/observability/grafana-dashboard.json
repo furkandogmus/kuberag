@@ -7,10 +7,10 @@
   "templating": {
     "list": [
       {
-        "name": "knowledgebase",
+        "name": "namespace",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "query": "label_values(rag_knowledgebase_indexed_chunks, knowledgebase)",
+        "query": "label_values(rag_knowledgebase_indexed_chunks, namespace)",
         "includeAll": true,
         "multi": true
       }
@@ -22,7 +22,7 @@
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "targets": [
-        {"expr": "rag_knowledgebase_indexed_chunks{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "{{knowledgebase}}"}
+        {"expr": "rag_knowledgebase_indexed_chunks{namespace=~\"$namespace\"}", "legendFormat": "{{namespace}}"}
       ]
     },
     {
@@ -31,7 +31,7 @@
       "fieldConfig": {"defaults": {"min": 0, "max": 100, "unit": "percent"}},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "targets": [
-        {"expr": "rag_knowledgebase_recall_percent{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "{{knowledgebase}}"}
+        {"expr": "rag_knowledgebase_recall_percent{namespace=~\"$namespace\"}", "legendFormat": "{{namespace}}"}
       ]
     },
     {
@@ -39,7 +39,7 @@
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "targets": [
-        {"expr": "sum by (result) (rate(rag_knowledgebase_ingestions_total{knowledgebase=~\"$knowledgebase\"}[5m]))", "legendFormat": "{{result}}"}
+        {"expr": "sum by (result) (rate(rag_knowledgebase_ingestions_total{namespace=~\"$namespace\"}[5m]))", "legendFormat": "{{result}}"}
       ]
     },
     {
@@ -47,8 +47,8 @@
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "targets": [
-        {"expr": "rag_knowledgebase_autotune_attempts{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "attempts {{knowledgebase}}"},
-        {"expr": "rag_knowledgebase_autotune_best_recall_percent{knowledgebase=~\"$knowledgebase\"}", "legendFormat": "best recall {{knowledgebase}}"}
+        {"expr": "rag_knowledgebase_autotune_attempts{namespace=~\"$namespace\"}", "legendFormat": "attempts {{namespace}}"},
+        {"expr": "rag_knowledgebase_autotune_best_recall_percent{namespace=~\"$namespace\"}", "legendFormat": "best recall {{namespace}}"}
       ]
     },
     {
@@ -57,6 +57,55 @@
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
       "targets": [
         {"expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m]))", "legendFormat": "{{controller}}"}
+      ]
+    },
+    {
+      "title": "Retriever request rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "sum by (result) (rate(kuberag_retriever_queries_total[5m]))", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "title": "Retriever latency p50 / p95 / p99",
+      "type": "timeseries",
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(kuberag_retriever_query_duration_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(kuberag_retriever_query_duration_seconds_bucket[5m])))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(kuberag_retriever_query_duration_seconds_bucket[5m])))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "Retriever saturation",
+      "type": "timeseries",
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24},
+      "targets": [
+        {"expr": "kuberag_retriever_queries_in_flight / clamp_min(kuberag_retriever_concurrency_limit, 1)", "legendFormat": "{{pod}}"}
+      ]
+    },
+    {
+      "title": "Rejected requests",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "sum by (reason) (rate(kuberag_retriever_rejected_requests_total[5m]))", "legendFormat": "{{reason}}"}
+      ]
+    },
+    {
+      "title": "Ingestion freshness",
+      "description": "Seconds since the latest successful KnowledgeBase ingestion in each namespace.",
+      "type": "timeseries",
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40},
+      "targets": [
+        {
+          "expr": "time() - rag_knowledgebase_last_successful_ingestion_timestamp_seconds{namespace=~\"$namespace\"}",
+          "legendFormat": "{{namespace}}"
+        }
       ]
     }
   ]

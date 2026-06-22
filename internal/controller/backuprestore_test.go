@@ -234,6 +234,9 @@ func TestRestoreJobBuilder(t *testing.T) {
 	if envMap["RESTORE_LOCATION"] != completedBackup.Status.Location {
 		t.Errorf("unexpected RESTORE_LOCATION: %q", envMap["RESTORE_LOCATION"])
 	}
+	if envMap["RESTORE_ROUND"] == "" {
+		t.Error("expected RESTORE_ROUND for versioned atomic restore")
+	}
 	if envMap["RESTORE_S3_ENDPOINT"] != "https://s3.amazonaws.com" {
 		t.Errorf("unexpected RESTORE_S3_ENDPOINT: %q", envMap["RESTORE_S3_ENDPOINT"])
 	}

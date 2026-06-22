@@ -23,6 +23,13 @@ import retriever.server as server
 
 
 class TestRetrieverServer(unittest.TestCase):
+    @staticmethod
+    def metric_value(metric_prefix):
+        for line in server._metrics.render().decode().splitlines():
+            if line.startswith(metric_prefix + " "):
+                return float(line.rsplit(" ", 1)[1])
+        return 0
+
     def setUp(self):
         self.client = TestClient(server.app)
 
@@ -46,6 +53,9 @@ class TestRetrieverServer(unittest.TestCase):
         server._RATE_LIMIT_ENABLED = False
         server._RATE_LIMIT_RPM = 60
         server._RATE_LIMIT_BURST = 20
+        server._RATE_LIMIT_BACKEND = "local"
+        server._RATE_LIMIT_CLIENT_ID_HEADER = ""
+        server._redis_rate_limiter = None
         server._MAX_CONCURRENT_REQUESTS = 32
         server._MAX_REQUEST_BODY_BYTES = 1048576
         server._active_requests = 0
@@ -60,6 +70,9 @@ class TestRetrieverServer(unittest.TestCase):
         server._AUTH_ENABLED = False
         server._API_KEY = ""
         server._RATE_LIMIT_ENABLED = False
+        server._RATE_LIMIT_BACKEND = "local"
+        server._RATE_LIMIT_CLIENT_ID_HEADER = ""
+        server._redis_rate_limiter = None
         server._MAX_CONCURRENT_REQUESTS = 32
         server._MAX_REQUEST_BODY_BYTES = 1048576
         server._active_requests = 0
@@ -369,6 +382,15 @@ class TestRetrieverServer(unittest.TestCase):
         self.assertEqual(meta["returned"], 1)
         self.assertIn("tookMillis", meta)
 
+    def test_query_updates_prometheus_metrics(self):
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = []
+        prefix = 'kuberag_retriever_queries_total{result="success"}'
+        before = self.metric_value(prefix)
+        resp = self.client.post("/query", json={"query": "hello"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.metric_value(prefix), before + 1)
+
     def test_query_with_generation_overrides(self):
         self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
         self.mock_store.search.return_value = [
@@ -449,6 +471,31 @@ class TestRetrieverServer(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"status": "ok"})
 
+    def test_readyz_checks_redis_backend_without_authentication(self):
+        server._AUTH_ENABLED = True
+        server._API_KEY = "top-secret"
+        server._RATE_LIMIT_ENABLED = True
+        server._RATE_LIMIT_BACKEND = "redis"
+        server._redis_rate_limiter = MagicMock()
+        server._redis_rate_limiter.ping.return_value = True
+
+        response = self.client.get("/readyz")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ready"})
+        server._redis_rate_limiter.ping.assert_called_once()
+
+    def test_readyz_fails_when_redis_is_unavailable(self):
+        server._RATE_LIMIT_ENABLED = True
+        server._RATE_LIMIT_BACKEND = "redis"
+        server._redis_rate_limiter = MagicMock()
+        server._redis_rate_limiter.ping.side_effect = RuntimeError("redis down")
+
+        response = self.client.get("/readyz")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"status": "not-ready"})
+
     def test_empty_configured_api_key_fails_closed(self):
         server._AUTH_ENABLED = True
         server._API_KEY = ""
@@ -468,6 +515,60 @@ class TestRetrieverServer(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 429)
         self.assertGreaterEqual(int(second.headers["retry-after"]), 1)
+
+    def test_redis_rate_limit_is_shared_backend(self):
+        server._RATE_LIMIT_ENABLED = True
+        server._RATE_LIMIT_BACKEND = "redis"
+        server._redis_rate_limiter = MagicMock()
+        server._redis_rate_limiter.consume.side_effect = [
+            (True, 0),
+            (False, 7),
+        ]
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = []
+
+        first = self.client.post("/query", json={"query": "hello"})
+        second = self.client.post("/query", json={"query": "hello"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(second.headers["retry-after"], "7")
+        self.assertEqual(server._redis_rate_limiter.consume.call_count, 2)
+
+    def test_trusted_identity_header_is_hashed_before_limiter(self):
+        server._RATE_LIMIT_ENABLED = True
+        server._RATE_LIMIT_BACKEND = "redis"
+        server._RATE_LIMIT_CLIENT_ID_HEADER = "X-Forwarded-Email"
+        server._redis_rate_limiter = MagicMock()
+        server._redis_rate_limiter.consume.return_value = (True, 0)
+        self.mock_embedder.embed_query.return_value = [0.1, 0.2, 0.3]
+        self.mock_store.search.return_value = []
+
+        response = self.client.post(
+            "/query",
+            json={"query": "hello"},
+            headers={"X-Forwarded-Email": "alice@example.com"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        identity = server._redis_rate_limiter.consume.call_args.args[0]
+        self.assertTrue(identity.startswith("header:"))
+        self.assertNotIn("alice@example.com", identity)
+
+    def test_redis_rate_limit_failure_is_fail_closed(self):
+        server._RATE_LIMIT_ENABLED = True
+        server._RATE_LIMIT_BACKEND = "redis"
+        server._redis_rate_limiter = MagicMock()
+        server._redis_rate_limiter.consume.side_effect = RuntimeError("redis down")
+
+        response = self.client.post("/query", json={"query": "hello"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["retry-after"], "1")
+        self.assertEqual(
+            response.json(),
+            {"detail": "rate limit backend unavailable"},
+        )
 
     def test_concurrency_limit_returns_503(self):
         server._MAX_CONCURRENT_REQUESTS = 1
