@@ -970,7 +970,7 @@ spec:
                 description: |-
                   APIKeySecretRef enables API-key authentication for the retriever. The
                   referenced Secret value is accepted as either an Authorization Bearer
-                  token or an X-API-Key header. Health probes remain unauthenticated.
+                  token or an X-API-Key header. Health/readiness probes remain unauthenticated.
                 properties:
                   key:
                     type: string
