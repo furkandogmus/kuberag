@@ -275,18 +275,9 @@ jobs:
           kubectl rollout status deploy/e2e-docs-retriever --timeout=120s
           kubectl port-forward svc/e2e-docs-retriever 8000:8000 &
           sleep 4
-          echo "=== healthz ==="
-          curl -sv http://localhost:8000/healthz 2>&1
-          echo "=== readyz ==="
-          curl -sv http://localhost:8000/readyz 2>&1
-          echo "=== query ==="
           RESP=$(curl -s http://localhost:8000/query -H 'content-type: application/json' \
-            -d '{"query":"machine learning resources","topK":3}'); rc=$?
-          echo "curl exit code: $rc"
-          echo "raw response:"
-           echo "$RESP" | head -c 2000
-           echo ""
-           echo "$RESP" | jq . || true
+            -d '{"query":"machine learning resources","topK":3}')
+          echo "$RESP" | jq .
           CHUNKS=$(kubectl get kb e2e-docs -o jsonpath='{.status.indexedChunks}')
           echo "indexedChunks=$CHUNKS"
           if [ "$CHUNKS" -gt 0 ]; then

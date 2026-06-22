@@ -150,6 +150,7 @@ if _RATE_LIMIT_ENABLED and _RATE_LIMIT_BACKEND == "redis":
         _RATE_LIMIT_BURST,
     )
 _MAX_CONCURRENT_REQUESTS = max(1, int(os.environ.get("MAX_CONCURRENT_REQUESTS", "32") or 32))
+_MAX_REQUEST_BODY_BYTES = int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024)))
 _metrics.set_capacity(_MAX_CONCURRENT_REQUESTS)
 _log_burst = 30
 _log_interval = 10.0
