@@ -247,7 +247,7 @@ jobs:
 
       - name: Install CRDs and RBAC
         run: |
-          kubectl apply -f config/crd
+          kubectl apply -k config/crd
           kubectl apply -f config/rbac/role.yaml
           kubectl apply -f config/rbac/priority-class.yaml
           kubectl create namespace kuberag-system --dry-run=client -o yaml | kubectl apply -f -

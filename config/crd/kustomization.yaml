@@ -2,7 +2,9 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
+  - rag.furkan.dev_backups.yaml
   - rag.furkan.dev_ingestionruns.yaml
   - rag.furkan.dev_knowledgebases.yaml
+  - rag.furkan.dev_restores.yaml
   - rag.furkan.dev_retrievers.yaml
   - rag.furkan.dev_vectorindices.yaml
