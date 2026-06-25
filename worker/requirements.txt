@@ -1,23 +1,23 @@
 # Core (always needed by the worker)
-fastembed==0.4.2
-qdrant-client==1.12.1
-kubernetes==31.0.0
+fastembed==0.8.0
+qdrant-client==1.18.0
+kubernetes==36.0.2
 
 # Source backends
-boto3==1.35.76           # s3
-requests==2.33.0         # web crawl
-pypdf==6.7.3             # pdf parser
+boto3==1.43.36           # s3
+requests==2.34.2         # web crawl
+pypdf==6.14.2             # pdf parser
 # pillow pin: fastembed 0.4.2 requires pillow<11.0.0 >=10.3.0,
 # so 12.x is unavailable. The Trivy scan will report pillow CVEs
 # until fastembed upgrades its constraint. Tracked in ROADMAP.
 # pillow>=12.1.1           # transitively pulled by fastembed
 
 # Optional vector stores (kept here so the single worker image is fully capable)
-psycopg[binary]==3.2.3   # pgvector
-pymilvus==2.5.0          # milvus
+psycopg[binary]==3.3.4   # pgvector
+pymilvus==3.0.0          # milvus
 marshmallow==3.26.2     # environs (via pymilvus) needs marshmallow.__version_info__ (gone in 4.x)
 setuptools==80.10.2     # pymilvus imports pkg_resources, removed from setuptools 81+
 
 # Optional embedding provider
-openai==1.58.1
+openai==2.44.0
 httpx==0.28.1
