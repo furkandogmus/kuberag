@@ -1,6 +1,6 @@
 # Build the operator binary. Cross-compile to the target arch on the native
 # build platform so multi-arch builds don't pay the QEMU emulation tax.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
